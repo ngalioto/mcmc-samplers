@@ -1,0 +1,42 @@
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages]
+find = {}  # Scan the project directory with the default parameters
+
+[project]
+name = "mcmc_samplers"
+version = "0.0.1"
+authors = [
+  { name="Nicholas Galioto", email="ngalioto@umich.edu" },
+]
+description = "A Python package for MCMC sampling."
+readme = "README.md"
+dependencies = [
+    "torch"
+]
+license = {file = "LICENSE"}
+keywords = [
+"Markov chain Monte Carlo",
+"MCMC",
+"sampling",
+"Metropolis-Hastings",
+"delayed rejection",
+"adaptive Metropolis",
+"delayed rejection adaptive Metropolis",
+"Hamiltonian Monte Carlo",
+"Hybrid Monte Carlo",
+"HMC"
+]
+classifiers = [
+"Intended Audience :: Science/Research",
+"License :: OSI Approved :: GNU General Public License v3 (GPLv3)",
+"Natural Language :: English",
+"Operating System :: OS Independent",
+"Programming Language :: Python :: 3",
+"Topic :: Scientific/Engineering :: Mathematics"
+]
+
+[project.urls]
+Homepage = "https://github.com/ngalioto/mcmc_samplers"

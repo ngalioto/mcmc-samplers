@@ -1,19 +1,17 @@
 import torch
-from samplers import Sampler
-from proposals import *
-from base import Sample
+from mcmc_samplers import *
 from abc import ABC, abstractmethod
 from collections.abc import Callable
 from typing import Union, Tuple
 
-'''
-Defines the `Delayed_Rejection` abstract base class and all MCMC samplers that are derived from it.
-'''
+"""
+Defines the `DelayedRejection` abstract base class and all MCMC samplers that are derived from it.
+"""
 
-class Delayed_Rejection(Sampler, ABC):
+class DelayedRejection(Sampler, ABC):
     
-    '''
-    The `Delayed_Rejection` abstract base class. It is a child class of the `Sampler` class. This class executes the multi-tiered proposal algorithm known as ``delayed rejection.''
+    """
+    The `DelayedRejection` abstract base class. It is a child class of the `Sampler` class. This class executes the multi-tiered proposal algorithm known as ``delayed rejection.''
 
     Citation:
         Green, Peter J., and Antonietta Mira. ``Delayed rejection in reversible jump Metropolis-Hastings.'' Biometrika 88.4 (2001): 1035-1053.
@@ -21,7 +19,7 @@ class Delayed_Rejection(Sampler, ABC):
     Attributes
     ----------
     Carries the same attributes as the parent class `Sampler`.
-    '''
+    """
 
     def __init__(
             self,
@@ -31,8 +29,8 @@ class Delayed_Rejection(Sampler, ABC):
             num_stages : int = 1
     ):
         
-        '''
-        `Delayed_Rejection` constructor. Constructs the acceptance_kernels according to the delayed rejection algorithm.
+        """
+        `DelayedRejection` constructor. Constructs the acceptance_kernels according to the delayed rejection algorithm.
 
         Parameters
         ----------
@@ -44,7 +42,7 @@ class Delayed_Rejection(Sampler, ABC):
             list of proposals.
         num_stages : int
             Number of proposal stages/tiers. Default is 1
-        '''
+        """
         
         super().__init__(
             target = target,
@@ -62,7 +60,7 @@ class Delayed_Rejection(Sampler, ABC):
             stage : int = 1
     ) -> torch.Tensor:
         
-        '''
+        """
         Evaluates the log acceptance probability of a proposed sample at a given stage level.
 
         Parameters
@@ -76,7 +74,7 @@ class Delayed_Rejection(Sampler, ABC):
         ----------
         int
             the log acceptance probability
-        '''
+        """
 
         assert len(y) == stage + 1
         assert self._denom is not None
@@ -104,26 +102,42 @@ class Delayed_Rejection(Sampler, ABC):
                 numer += self.proposals[stage-2].log_prob(y[:0:-1])
 
         if not self.proposals[stage-1].is_symmetric:
-            numer += self.proposals[stage-1](y[::-1])
-            denom += self.proposals[stage-1](y)
+            numer += self.proposals[stage-1].log_prob(y[::-1])
+            denom += self.proposals[stage-1].log_prob(y)
 
         self._denom = denom
         self._alpha = min(torch.zeros(1), numer - self._denom)
         return self._alpha
 
-    
-class Delayed_Rejection_Adaptive_Metropolis(Delayed_Rejection):
+    def _sample(
+            self
+    ) -> int:
+        
+        """
+        Advances the Markov chain one step. 
 
-    '''
-    Implementation of the delayed rejection adaptive Metropolis (DRAM) sampler. This is a child class of the `Delayed_Rejection`
+        Returns
+        ----------
+        int
+            1 if a proposed sample is accepted and 0 otherwise.
+        """
+        
+        self._denom = self.x.log_prob
+        return super()._sample()
+
+    
+class DelayedRejectionAdaptiveMetropolis(DelayedRejection):
+
+    """
+    Implementation of the delayed rejection adaptive Metropolis (DRAM) sampler. This is a child class of the `DelayedRejection`
 
     Citation:
         Haario, Heikki, et al. "DRAM: efficient adaptive MCMC." Statistics and computing 16 (2006): 339-354.
 
     Attributes
     ----------
-    The attributes are the same as those in the `Delayed_Rejection` parent class.    
-    '''
+    The attributes are the same as those in the `DelayedRejection` parent class.    
+    """
 
     def __init__(
             self,
@@ -136,8 +150,8 @@ class Delayed_Rejection_Adaptive_Metropolis(Delayed_Rejection):
             eps : float = 1e-8
     ):
         
-        '''
-        Delayed_Rejection_Adaptive_Metropolis constructor.
+        """
+        DelayedRejectionAdaptiveMetropolis constructor.
 
         target : Callable[[torch.Tensor], [torch.Tensor]]
             function evaluating the log probability of the target distribution
@@ -153,10 +167,10 @@ class Delayed_Rejection_Adaptive_Metropolis(Delayed_Rejection):
             Number of iterations to run the sampler before using the empirical sample covariance as the first-stage proposal covariance. Default is 200
         eps : float
             Small positive value added to the diagonal of the proposal covariance during adaptation to encourage positive-definitess. Default is 1e-8
-        '''
+        """
         
-        proposals = [Adaptive_Covariance(cov, sd, n0, eps)]
-        proposals.append(Scaled_Covariance(proposals[0], gamma))
+        proposals = [AdaptiveCovariance(cov, sd, n0, eps)]
+        proposals.append(ScaledCovariance(proposals[0], gamma))
         super().__init__(
             target = target,
             x0 = x0,
@@ -168,30 +182,29 @@ class Delayed_Rejection_Adaptive_Metropolis(Delayed_Rejection):
             self
     ) -> int:
         
-        '''
+        """
         Advances the Markov chain one step. First, this method adapts the proposal covariance with the adaptive Metropolis (AM) algorithm. Then it samples with the delayed rejection (DR) algorithm.
 
         Returns
         ----------
         int
             1 if a proposed sample is accepted and 0 otherwise.
-        '''
+        """
         
         self.proposals[0]._adapt(self.x.point.squeeze())
-        self._denom = self.x.log_prob
         return super()._sample()
 
     
 
-class Metropolis_Hastings(Delayed_Rejection):
+class MetropolisHastings(DelayedRejection):
 
-    '''
-    The basic Metropolis-Hastings MCMC sampler. Samples are proposed with a Gaussian random walk and accepted with probability given by the Metropolis-Hastings acceptance kernel. This is a child of the `Delayed_Rejection` class.
+    """
+    The basic Metropolis-Hastings MCMC sampler. Samples are proposed with a Gaussian random walk and accepted with probability given by the Metropolis-Hastings acceptance kernel. This is a child of the `DelayedRejection` class.
 
     Attributes
     ----------
-    The attributes are the same as those of the `Delayed_Rejection` parent class.
-    '''
+    The attributes are the same as those of the `DelayedRejection` parent class.
+    """
 
     def __init__(
             self,
@@ -200,8 +213,8 @@ class Metropolis_Hastings(Delayed_Rejection):
             cov : torch.Tensor = None
     ):
         
-        '''
-        Metropolis_Hastings constructor
+        """
+        MetropolisHastings constructor
 
         target : Callable[[torch.Tensor], [torch.Tensor]]
             function evaluating the log probability of the target distribution
@@ -209,9 +222,9 @@ class Metropolis_Hastings(Delayed_Rejection):
             the lower cholesky decomposition of the covariance of the Gaussian random walk proposal
         cov : torch.Tensor
             the covariance of the Gaussian random walk proposal. Do not need to pass this if `sqrt_cov` is already passed.
-        '''
+        """
         
         super().__init__(
             target = target,
-            proposals = [Gaussian_Random_Walk(sqrt_cov, cov)]
+            proposals = [GaussianRandomWalk(sqrt_cov, cov)]
         )

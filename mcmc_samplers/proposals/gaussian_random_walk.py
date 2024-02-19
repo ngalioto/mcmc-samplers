@@ -1,19 +1,15 @@
 import torch
 from math import sqrt
-from proposals import Proposal
-from base import Sample
-from typing import Tuple
+from mcmc_samplers import Proposal, Sample
+from typing import Tuple, Union
 
-from torch.distributions.multivariate_normal import MultivariateNormal
-import math
+"""
+Defines the `GaussianRandomWalk` base class and all proposals that are derived from it.
+"""
 
-'''
-Defines the `Gaussian_Random_Walk` abstract base class and all proposals that are derived from it.
-'''
-
-class Gaussian_Random_Walk(Proposal):
+class GaussianRandomWalk(Proposal):
     
-    '''
+    """
     Generates proposals using a Gaussian random walk.
 
     Attributes
@@ -22,7 +18,7 @@ class Gaussian_Random_Walk(Proposal):
         Lower cholesky decomposition of the covariance of Gaussian proposal
     dim : int
         Dimension of the Gaussian proposal
-    '''
+    """
 
     def __init__(
             self,
@@ -30,8 +26,8 @@ class Gaussian_Random_Walk(Proposal):
             cov : torch.Tensor = None
     ):
         
-        '''
-        Gaussian_Random_Walk constructor.
+        """
+        GaussianRandomWalk constructor.
 
         Parameters
         ----------
@@ -39,7 +35,7 @@ class Gaussian_Random_Walk(Proposal):
             Lower cholesky decomposition of the covariance of Gaussian proposal. Must be 2-dimensional and square.
         cov : torch.Tensor
             Covariance matrix of the Gaussian proposal. Must be symmetric and positive-definite.
-        '''
+        """
         
         if sqrt_cov is not None:
             if sqrt_cov.ndim !=2 or sqrt_cov.shape[0] != sqrt_cov.shape[1]:
@@ -51,7 +47,7 @@ class Gaussian_Random_Walk(Proposal):
             except:
                 raise ValueError('cov must be a symmetric positive-definite matrix')
         else:
-            raise ValueError('Gaussian_Random_Walk requires either sqrt_cov or cov for initialization')
+            raise ValueError('GaussianRandomWalk requires either sqrt_cov or cov for initialization')
 
         self.dim = self.sqrt_cov.shape[0]
         
@@ -60,14 +56,14 @@ class Gaussian_Random_Walk(Proposal):
             self
     ) -> bool:
         
-        '''
+        """
         Getter of `is_symmetric` property. 
 
         Returns
         ----------
         bool
             Gaussian distributions are symmetric, so this always returns `True`
-        '''
+        """
         
         return True
 
@@ -78,7 +74,7 @@ class Gaussian_Random_Walk(Proposal):
             N : int = 1
     ) -> Union[Sample, Tuple[Sample, ...]]:
         
-        '''
+        """
         Draws a sample from the Gaussian random walk
 
         Parameters
@@ -94,7 +90,7 @@ class Gaussian_Random_Walk(Proposal):
             The samples drawn from the Gaussian random walk.
             If `N` is 1, a Sample object is returned
             If `N`>1, a list of Sample objects is returned
-        '''
+        """
         
         sample_points = torch.randn(N, self.dim) @ self.sqrt_cov.T + y[0].point
         return [Sample(sample_points[ii]) for ii in range(N)] if N > 1 else Sample(sample_points)
@@ -104,7 +100,7 @@ class Gaussian_Random_Walk(Proposal):
             y : Tuple[Sample, ...]
     ) -> torch.Tensor:
         
-        '''
+        """
         Evaluates the log probability density of the Gaussian distribution
 
         Parameters
@@ -116,15 +112,15 @@ class Gaussian_Random_Walk(Proposal):
         ----------
         torch.Tensor
             Log probability density for a Gaussian centered at the first Sample in `y` evaluated at the last Sample in `y`.
-        '''
+        """
         
         return -0.5 * torch.sum(torch.linalg.solve_triangular(self.sqrt_cov, (y[0].point - y[-1].point).T, upper=False)**2, dim=0)
 
 
-class Adaptive_Covariance(Gaussian_Random_Walk):
+class AdaptiveCovariance(GaussianRandomWalk):
 
-    '''
-    A Gaussian random walk with covariance that adapts according to the sample covariance. This is a child class of the `Gaussian_Random_Walk` class.
+    """
+    A Gaussian random walk with covariance that adapts according to the sample covariance. This is a child class of the `GaussianRandomWalk` class.
 
     Attributes
     ---------
@@ -144,7 +140,7 @@ class Adaptive_Covariance(Gaussian_Random_Walk):
         The iteration number.
     mean : torch.Tensor
         The running sample mean
-    '''
+    """
 
     def __init__(
             self,
@@ -154,8 +150,8 @@ class Adaptive_Covariance(Gaussian_Random_Walk):
             eps : float = 1e-8
     ):
         
-        '''
-        Adaptive_Covariance constructor.
+        """
+        AdaptiveCovariance constructor.
 
         Parameters
         ----------
@@ -167,7 +163,7 @@ class Adaptive_Covariance(Gaussian_Random_Walk):
             Number of Markov chain iterations before using adaptive covariance. Default is 200
         eps : float
             Small positive value to be added to the covariance diagonal during adaptation to encourage positive-definiteness. Default is 1e-8
-        '''
+        """
 
         super().__init__(cov = cov)
         self.sd = 2.4**2 / self.dim if sd is None else sd
@@ -184,14 +180,14 @@ class Adaptive_Covariance(Gaussian_Random_Walk):
             self
     ) -> torch.Tensor:
         
-        '''
+        """
         Getter for the `cov` property.
 
         Returns
         ----------
         torch.Tensor
             If `iteration`>`n0`, the sample covariance is returned. Otherwise, the initial covariance is returned.
-        '''
+        """
         
         if self.iteration > self.n0:
             return self._cov_ii
@@ -204,14 +200,14 @@ class Adaptive_Covariance(Gaussian_Random_Walk):
         value : torch.Tensor
     ):
         
-        '''
+        """
         Setter for the `cov` property
 
         Parameters
         ----------
         value : torch.Tensor
             A covariance matrix.
-        '''
+        """
         
         self._cov_0 = value
         self._cov_ii = value.clone()
@@ -222,14 +218,14 @@ class Adaptive_Covariance(Gaussian_Random_Walk):
             x : torch.Tensor
     ):
         
-        '''
+        """
         Adaptation algorithm for updating the adaptive covariance. Updates the sample mean `mean` and covariance `_cov_ii`
 
         Parameters
         ----------
         x : torch.Tensor
             The most recent state value in the Markov chain.
-        '''
+        """
         
         self.iteration += 1
 
@@ -251,7 +247,7 @@ class Adaptive_Covariance(Gaussian_Random_Walk):
             N : int = 1
     ) -> Union[Sample, Tuple[Sample, ...]]:
         
-        '''
+        """
         Generates a proposed state from the Gaussian random walk with adaptive covariance.
 
         Parameters
@@ -265,33 +261,33 @@ class Adaptive_Covariance(Gaussian_Random_Walk):
         ----------
         Union[Sample, Tuple[Sample, ...]]
             Returns the proposed state wrapped inside a Sample object if `N` is 1. Otherwise, returns a list of Sample objects, each containing a proposed state
-        '''
+        """
         
         return super().propose(y,N)
 
 
-class Scaled_Covariance(Gaussian_Random_Walk):
+class ScaledCovariance(GaussianRandomWalk):
 
-    '''
-    Wraps a Gaussian_Random_Walk
-    '''
+    """
+    Wraps a GaussianRandomWalk
+    """
 
     def __init__(
             self,
-            covariance : Gaussian_Random_Walk,
+            covariance : GaussianRandomWalk,
             gamma : float = 1e-2
     ):
         
-        '''
-        Scaled_Covariance constructor.
+        """
+        ScaledCovariance constructor.
 
         Parameters
         ----------
-        covariance : Gaussian_Random_Walk
+        covariance : GaussianRandomWalk
             The Gaussian random walk proposal to be scaled.
         gamma : float
             The scaling factor for the second-stage proposal covariance. Default is 1e-2.
-        '''
+        """
         
         self.covariance = covariance
         self.sqrt_gamma = sqrt(gamma)
@@ -301,14 +297,14 @@ class Scaled_Covariance(Gaussian_Random_Walk):
             self
     ) -> torch.Tensor:
         
-        '''
+        """
         Getter for the `sqrt_cov` property. 
 
         Returns
         ----------
         torch.Tensor
-            The `sqrt_cov` property of the wrapped Gaussian_Random_Walk object scaled by `sqrt_gamma`.
-        '''
+            The `sqrt_cov` property of the wrapped GaussianRandomWalk object scaled by `sqrt_gamma`.
+        """
         
         return self.covariance.sqrt_cov * self.sqrt_gamma
 
@@ -317,13 +313,13 @@ class Scaled_Covariance(Gaussian_Random_Walk):
             self
     ) -> int:
         
-        '''
+        """
         Getter for the `dim` property. 
 
         Returns
         ----------
         int
-            The `dim` property of the wrapped Gaussian_Random_Walk object.
-        '''
+            The `dim` property of the wrapped GaussianRandomWalk object.
+        """
         
         return self.covariance.dim
