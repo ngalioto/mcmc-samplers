@@ -21,8 +21,6 @@ from mcmc_samplers.samplers.hamiltonian import HamiltonianMonteCarlo
 # Visualization
 from mcmc_samplers.visualization.sample_visualizer import SampleVisualizer
 
-__version__ = "0.0.1"
-
 __all__ = (
     "AdaptiveCovariance",
     "DelayedRejection",

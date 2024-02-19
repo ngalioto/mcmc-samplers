@@ -6,7 +6,7 @@ A Python package for performing MCMC sampling with PyTorch.
 To install this package, run the following command from the terminal:
 
 ```sh
-pip install mcmc_samplers
+pip install mcmc-samplers
 ```
 
 ## Framework
