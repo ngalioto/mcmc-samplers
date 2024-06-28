@@ -239,7 +239,16 @@ class AdaptiveCovariance(GaussianRandomWalk):
         self._cov_ii += (self.sd / self.iteration) * (outer - outer_mean + self.eps * torch.eye(self.dim))
 
         if self.iteration > self.n0:
-            self.sqrt_cov = torch.linalg.cholesky(self._cov_ii, upper=False)
+            try:
+                self.sqrt_cov = torch.linalg.cholesky(self._cov_ii, upper=False)
+            except:
+                for ii in range(-8, 1, -1):
+                    try:
+                        self._cov_ii += torch.diag(10^(ii)*torch.ones(self.dim))
+                        self.sqrt_cov = torch.linalg.cholesky(self._cov_ii, upper=False)
+                        break
+                    except:
+                        pass
 
     def propose(
             self,

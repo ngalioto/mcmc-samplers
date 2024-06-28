@@ -106,7 +106,10 @@ class DelayedRejection(Sampler, ABC):
             denom += self.proposals[stage-1].log_prob(y)
 
         self._denom = denom
-        self._alpha = min(torch.zeros(1), numer - self._denom)
+        self._alpha = numer - self._denom
+        if torch.isnan(self._alpha):
+            self._alpha = torch.tensor([-torch.inf])
+        self._alpha = min(torch.zeros(1), self._alpha)
         return self._alpha
 
     def _sample(

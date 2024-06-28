@@ -145,5 +145,3 @@ class Sampler(ABC):
             log_probs[ii] = self.x.log_prob
             
         return samples, log_probs
-
-
