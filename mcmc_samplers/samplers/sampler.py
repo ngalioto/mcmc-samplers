@@ -27,10 +27,12 @@ class Sampler(ABC):
 
     def __init__(
             self,
-            target : Callable[[torch.Tensor], [torch.Tensor]],
+            target : Callable[[torch.Tensor], torch.Tensor],
             x0 : Union[Sample, torch.Tensor],
             proposals : Tuple[Proposal, ...],
-            acceptance_kernels : Tuple[Callable[[Sample, Tuple[Sample, ...]],[torch.Tensor]], ...]
+            acceptance_kernels : Tuple[Callable[[Sample, Tuple[Sample, ...]],torch.Tensor], ...],
+            noisy : bool = False,
+            reeval : int = 200
     ):
         
         """
@@ -53,6 +55,8 @@ class Sampler(ABC):
         self.x = torch.atleast_2d(x0)
         self.proposals = proposals
         self.acceptance_kernels = acceptance_kernels
+        self.noisy = noisy
+        self.reeval = reeval
 
     @property
     def x(
@@ -137,11 +141,21 @@ class Sampler(ABC):
             The second return object is a tensor holding the `target` log probability values of each state in the Markov chain.
         """
 
+        rejection_streak = 0
+
         samples = torch.zeros(N, self.x.point.shape[1])
         log_probs = torch.zeros(N)
         for ii in range(N):
-            self.acceptance_ratio = (ii * self.acceptance_ratio + self._sample()) / (ii+1)
+            accept = self._sample()
+            self.acceptance_ratio = (ii * self.acceptance_ratio + accept) / (ii+1)
             samples[ii] = self.x.point.detach()
+
+            if self.noisy:
+                rejection_streak = 0 if accept else rejection_streak + 1
+                if rejection_streak == self.reeval:
+                    self.x.log_prob = self.target(self.x.point)
+                    rejection_streak = 0
+
             log_probs[ii] = self.x.log_prob
             
         return samples, log_probs

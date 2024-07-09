@@ -110,6 +110,7 @@ class SampleVisualizer:
             labels : Tuple[str, ...] = None,
             titles : Tuple[str, ...] = None,
             partition : Tuple[Tuple[int, ...], ...] = None,
+            **hist_kwargs
     ) -> Tuple[Tuple[plt.Figure, ...], Tuple[np.ndarray, ...]]:
         
         """
@@ -149,7 +150,7 @@ class SampleVisualizer:
                         axs[row,col].axis('off')
                     # diagonal. 1D histograms.
                     elif row == col:
-                        axs[row,col].hist(self.samples[::step,idx[row]], bins=bins)
+                        axs[row,col].hist(self.samples[::step,idx[row]], bins=bins, **hist_kwargs)
                         plt.setp(axs[row,col].get_yaxis(), visible=False)        
                     # lower triangle. 2D histograms.
                     else:
@@ -159,7 +160,7 @@ class SampleVisualizer:
                         if col > 0:
                             axs[row,col-1].get_shared_y_axes().join(axs[row,col-1],axs[row,col])
                         
-                        axs[row,col].hist2d(self.samples[::step,idx[col]], self.samples[::step,idx[row]], bins=bins)
+                        axs[row,col].hist2d(self.samples[::step,idx[col]], self.samples[::step,idx[row]], bins=bins, **hist_kwargs)
 
                     # Adjust axis labels and axis visibility.
                     if col == 0 and row > 0:

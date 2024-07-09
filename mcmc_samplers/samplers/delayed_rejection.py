@@ -23,10 +23,12 @@ class DelayedRejection(Sampler, ABC):
 
     def __init__(
             self,
-            target : Callable[[torch.Tensor], [torch.Tensor]],
+            target : Callable[[torch.Tensor], torch.Tensor],
             x0 : Union[Sample, torch.Tensor],
             proposals : Tuple[Proposal, ...],
-            num_stages : int = 1
+            num_stages : int = 1,
+            noisy : bool = False,
+            reeval : int = 200
     ):
         
         """
@@ -48,7 +50,9 @@ class DelayedRejection(Sampler, ABC):
             target = target,
             x0 = x0,
             proposals = proposals,
-            acceptance_kernels = [lambda y, stage=ii : self._metropolis_hastings(y, stage) for ii in range(1, num_stages+1)]
+            acceptance_kernels = [lambda y, stage=ii : self._metropolis_hastings(y, stage) for ii in range(1, num_stages+1)],
+            noisy = noisy,
+            reeval = reeval
         )
 
         self._denom = None
@@ -129,6 +133,7 @@ class DelayedRejection(Sampler, ABC):
         return super()._sample()
 
     
+# can make this a child of adaptive metropolis
 class DelayedRejectionAdaptiveMetropolis(DelayedRejection):
 
     """
@@ -144,13 +149,15 @@ class DelayedRejectionAdaptiveMetropolis(DelayedRejection):
 
     def __init__(
             self,
-            target : Callable[[torch.Tensor], [torch.Tensor]],
+            target : Callable[[torch.Tensor], torch.Tensor],
             x0 : Union[Sample, torch.Tensor],
             cov : torch.Tensor = None,
             sd : float = None,
             gamma : float = 1e-2,
             n0 : int = 200,
-            eps : float = 1e-8
+            eps : float = 1e-8,
+            noisy : bool = False,
+            reeval : int = 200
     ):
         
         """
@@ -178,7 +185,9 @@ class DelayedRejectionAdaptiveMetropolis(DelayedRejection):
             target = target,
             x0 = x0,
             proposals = proposals,
-            num_stages = 2
+            num_stages = 2,
+            noisy = noisy,
+            reeval = reeval
         )
 
     def _sample(
@@ -196,7 +205,72 @@ class DelayedRejectionAdaptiveMetropolis(DelayedRejection):
         
         self.proposals[0]._adapt(self.x.point.squeeze())
         return super()._sample()
+    
 
+class AdaptiveMetropolis(DelayedRejection):
+
+    """
+    Implementation of the adaptive Metropolis (AM) sampler. This is a child class of the `DelayedRejection`
+
+    Attributes
+    ----------
+    The attributes are the same as those in the `DelayedRejection` parent class.    
+    """
+
+    def __init__(
+            self,
+            target : Callable[[torch.Tensor], torch.Tensor],
+            x0 : Union[Sample, torch.Tensor],
+            cov : torch.Tensor = None,
+            sd : float = None,
+            n0 : int = 200,
+            eps : float = 1e-8,
+            noisy : bool = False,
+            reeval : int = 200
+    ):
+        
+        """
+        AdaptiveMetropolis constructor.
+
+        target : Callable[[torch.Tensor], [torch.Tensor]]
+            function evaluating the log probability of the target distribution
+        x0 : Union[Sample, torch.Tensor]
+            initial state of the Markov chain
+        cov : torch.Tensor, optional
+            Tensor representing the proposal covariance
+        sd : float, optional
+            Scaling factor applied to the proposal covariance. By default, the value is set to be $2.4^2 / d$, where $d$ is the dimension of the proposal
+        n0 : int
+            Number of iterations to run the sampler before using the empirical sample covariance as the first-stage proposal covariance. Default is 200
+        eps : float
+            Small positive value added to the diagonal of the proposal covariance during adaptation to encourage positive-definitess. Default is 1e-8
+        """
+        
+        proposals = [AdaptiveCovariance(cov, sd, n0, eps)]
+        super().__init__(
+            target = target,
+            x0 = x0,
+            proposals = proposals,
+            num_stages = 1,
+            noisy = noisy,
+            reeval = reeval
+        )
+
+    def _sample(
+            self
+    ) -> int:
+        
+        """
+        Advances the Markov chain one step. First, this method adapts the proposal covariance with the adaptive Metropolis (AM) algorithm. Then it samples with the delayed rejection (DR) algorithm.
+
+        Returns
+        ----------
+        int
+            1 if a proposed sample is accepted and 0 otherwise.
+        """
+        
+        self.proposals[0]._adapt(self.x.point.squeeze())
+        return super()._sample()
     
 
 class MetropolisHastings(DelayedRejection):
@@ -211,9 +285,12 @@ class MetropolisHastings(DelayedRejection):
 
     def __init__(
             self,
-            target : Callable[[torch.Tensor], [torch.Tensor]],
+            target : Callable[[torch.Tensor], torch.Tensor],
+            x0 : Union[Sample, torch.Tensor],
             sqrt_cov : torch.Tensor = None,
-            cov : torch.Tensor = None
+            cov : torch.Tensor = None,
+            noisy : bool = False,
+            reeval : int = 200
     ):
         
         """
@@ -229,5 +306,8 @@ class MetropolisHastings(DelayedRejection):
         
         super().__init__(
             target = target,
-            proposals = [GaussianRandomWalk(sqrt_cov, cov)]
+            x0 = x0,
+            proposals = [GaussianRandomWalk(sqrt_cov, cov)],
+            noisy = noisy,
+            reeval = reeval
         )

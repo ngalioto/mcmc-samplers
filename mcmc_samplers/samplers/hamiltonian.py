@@ -32,10 +32,12 @@ class HamiltonianMonteCarlo(DelayedRejection):
 
     def __init__(
             self,
-            target : Callable[[torch.Tensor], [torch.Tensor]],
+            target : Callable[[torch.Tensor], torch.Tensor],
             x0 : Union[Sample, torch.Tensor],
             step_size : float = 1e-1,
-            num_steps : int = 1
+            num_steps : int = 1,
+            noisy : bool = False,
+            reeval : int = 200
     ):
 
         """
@@ -64,7 +66,9 @@ class HamiltonianMonteCarlo(DelayedRejection):
                     step_size,
                     num_steps
                 )
-            ]
+            ],
+            noisy = noisy,
+            reeval = reeval
         )
 
 
