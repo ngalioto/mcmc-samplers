@@ -155,10 +155,10 @@ class SampleVisualizer:
                     # lower triangle. 2D histograms.
                     else:
                         # share x-axis with 1D histogram from same column.
-                        axs[row-1,col].get_shared_x_axes().join(axs[row-1,col],axs[row,col])
+                        axs[row-1,col].sharex(axs[row,col])
                         # share y-axis with 2D histograms from same row.
                         if col > 0:
-                            axs[row,col-1].get_shared_y_axes().join(axs[row,col-1],axs[row,col])
+                            axs[row,col-1].sharey(axs[row,col])
                         
                         axs[row,col].hist2d(self.samples[::step,idx[col]], self.samples[::step,idx[row]], bins=bins, **hist_kwargs)
 
