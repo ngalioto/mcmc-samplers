@@ -112,4 +112,4 @@ plt.show()
 Author: Nicholas Galioto  
 Email: [ngalioto@umich.edu](mailto:ngalioto@umich.edu)  
 License: GPL3  
-Copyright 2024, Nicholas Galioto
+Copyright 2025, Nicholas Galioto

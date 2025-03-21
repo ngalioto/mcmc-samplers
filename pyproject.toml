@@ -1,9 +1,6 @@
 [build-system]
-requires = ["setuptools"]
+requires = ["setuptools>=61.0"]
 build-backend = "setuptools.build_meta"
-
-[tool.setuptools.packages]
-find = {}  # Scan the project directory with the default parameters
 
 [project]
 name = "mcmc-samplers"
@@ -16,7 +13,7 @@ readme = "README.md"
 dependencies = [
     "torch"
 ]
-license = {file = "LICENSE"}
+license = {text = "GPLv3"}
 keywords = [
 "Markov chain Monte Carlo",
 "MCMC",
