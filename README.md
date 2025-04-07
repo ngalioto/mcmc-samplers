@@ -41,7 +41,7 @@ Any MCMC sampler can be seen simply as a proposal paired with an acceptance kern
 
 ## Example: Banana distribution
 
-A walkthrough of part of the [banana](banana.py) example is given here to demonstrate how the package can be used.
+A walkthrough of part of the [banana](examples/banana.ipynb) example is given here to demonstrate how the package can be used.
 
 First import the necessary packages.
 
