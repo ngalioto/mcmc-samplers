@@ -1,6 +1,7 @@
 import torch
 from mcmc_samplers import Proposal, Sample
 from abc import ABC
+from tqdm import tqdm
 from collections.abc import Callable
 from typing import Union, Tuple
 
@@ -123,7 +124,8 @@ class Sampler(ABC):
 
     def __call__(
             self,
-            N : int = 1
+            N : int = 1,
+            show_progress : bool = True
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         
         """
@@ -145,7 +147,7 @@ class Sampler(ABC):
 
         samples = torch.zeros(N, self.x.point.shape[1])
         log_probs = torch.zeros(N)
-        for ii in range(N):
+        for ii in tqdm(range(N)) if show_progress else range(N):
             accept = self._sample()
             self.acceptance_ratio = (ii * self.acceptance_ratio + accept) / (ii+1)
             samples[ii] = self.x.point.detach()
