@@ -4,16 +4,20 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "mcmc-samplers"
-version = "0.0.3"
+version = "0.1.0"
 authors = [
   { name="Nicholas Galioto", email="ngalioto@umich.edu" },
 ]
 description = "A Python package for MCMC sampling."
 readme = "README.md"
 dependencies = [
-    "torch"
+    "torch",
+    "tqdm",
+    "numpy",
+    "matplotlib"
 ]
 license = {text = "GPLv3"}
+
 keywords = [
 "Markov chain Monte Carlo",
 "MCMC",
@@ -35,5 +39,18 @@ classifiers = [
 "Topic :: Scientific/Engineering :: Mathematics"
 ]
 
+[project.optional-dependencies]
+dev = [
+    "pytest>=7",
+    "pytest-cov"
+]
+
 [project.urls]
 Homepage = "https://github.com/ngalioto/mcmc-samplers"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+filterwarnings = [
+    "ignore::DeprecationWarning",
+]

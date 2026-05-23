@@ -1,113 +1,65 @@
-import torch
-from torch.nn import Parameter
-from mcmc_samplers import Sample
-from typing import Union
+"""HamiltonianSample carries a position, momentum, and (cached) gradient."""
 
-"""
-Defines the HamiltonianSample class as a child of the `Sample` base class.
-"""
+from __future__ import annotations
+
+import torch
+
+from .sample import Sample
+
 
 class HamiltonianSample(Sample):
+    """Sample type used by Hamiltonian Monte Carlo and the No-U-Turn sampler.
 
-    """
-    A child of the Sample class for Hamiltonian Monte Carlo (HMC). Objects belonging to this class carry a position and momentum variable.
+    The position ``point`` is stored as a detached tensor; gradient computation
+    is handled explicitly by the dynamics class (see
+    :func:`mcmc_samplers.utils.autograd.log_prob_and_grad`).
 
     Attributes
     ----------
-    q : Sample
-        The position variable. The point value is initialized as torch.nn.Parameter so that gradients with resepct to `q` can be computed with `backward`.
-    p : torch.Tensor
-        The momentum variable. Auxiliary variable in HMC.
+    point : torch.Tensor
+        Position variable (1-D).
+    log_prob : torch.Tensor or None
+        Target log-density at ``point``.
+    grad : torch.Tensor or None
+        Gradient of ``log_prob`` w.r.t. ``point``.
+    p : torch.Tensor or None
+        Momentum variable (1-D), same shape as ``point``.
     """
 
+    __slots__ = ("p",)
+
     def __init__(
-            self,
-            q = Union[Sample, torch.Tensor],
-            p : torch.Tensor = None
+        self,
+        point: torch.Tensor | Sample | None = None,
+        log_prob: torch.Tensor | None = None,
+        grad: torch.Tensor | None = None,
+        p: torch.Tensor | None = None,
     ):
-
-        """
-        HamiltonianSample constructor.
-
-        Parameters
-        ----------
-        q : Union[Sample, torch.Tensor]
-            The position of the Hamiltonian dynamics. Either a Sample or torch.Tensor can be passed.
-        p : torch.Tensor, optional
-            The momentum of the Hamiltonian dynamics.
-        """
-        
-        if isinstance(q, Sample):
-            self.q = Sample(Parameter(q.point))
-            self.log_prob = q.log_prob
-        elif isinstance(q, torch.Tensor):
-            self.q = Sample(Parameter(q))
+        if isinstance(point, Sample):
+            super().__init__(
+                point=point.point,
+                log_prob=point.log_prob if log_prob is None else log_prob,
+                grad=point.grad if grad is None else grad,
+            )
         else:
-            raise ValueError("q must be of type either Sample or torch.Tensor")
+            super().__init__(point=point, log_prob=log_prob, grad=grad)
         self.p = p
 
-    @property
-    def point(
-            self
-    ) -> torch.Tensor:
+    def clone(self) -> "HamiltonianSample":
+        base = super().clone()
+        return HamiltonianSample(
+            point=base.point,
+            log_prob=base.log_prob,
+            grad=base.grad,
+            p=self.p.detach().clone() if self.p is not None else None,
+        )
 
-        """
-        Getter for the `point` property.
+    def __repr__(self) -> str:
+        parts = [f"point={self.point!s}"]
+        if self.log_prob is not None:
+            parts.append(f"log_prob={self.log_prob!s}")
+        if self.p is not None:
+            parts.append(f"p={self.p!s}")
+        return f"HamiltonianSample({', '.join(parts)})"
 
-        Returns
-        ----------
-        torch.Tensor
-            The value of the position sample.
-        """
-        
-        return self.q.point
-
-    @point.setter
-    def point(
-            self,
-            value : torch.Tensor
-    ):
-
-        """
-        Setter for the `point` property.
-
-        Parameters
-        ----------
-        value : torch.Tensor
-            The position value of the Hamiltonian system.
-        """
-        
-        self.q.point = value
-
-    @property
-    def log_prob(
-            self
-    ) -> torch.Tensor:
-
-        """
-        Getter for the `log_prob` property.
-
-        Returns
-        ----------
-        torch.Tensor
-            The log probability of a distribution of interested evaluated at the value of `self.point`.
-        """
-        
-        return self.q.log_prob
-
-    @log_prob.setter
-    def log_prob(
-            self,
-            value : torch.Tensor
-    ):
-
-        """
-        Setter for the `log_prob` property.
-
-        Parameters
-        ----------
-        value : torch.Tensor
-            The log probability of a distribution of interested evaluated at `self.point`.
-        """
-        
-        self.q.log_prob = value
+    __str__ = __repr__

@@ -1,101 +1,64 @@
-import torch
-from torch.distributions.multivariate_normal import MultivariateNormal
-from mcmc_samplers import *
+"""Toy example exercising DRAM and HMC on the classic banana distribution."""
+
+from __future__ import annotations
 
 import matplotlib.pyplot as plt
+import torch
+from torch.distributions.multivariate_normal import MultivariateNormal
 
-"""
-Toy example to demonstrate the functionality of the DRAM and HMC samplers.
-"""
+from mcmc_samplers import (
+    DelayedRejectionAdaptiveMetropolis,
+    HamiltonianMonteCarlo,
+    SampleVisualizer,
+)
+
 
 class Banana:
+    """A 2-D banana-shaped joint density."""
 
-    """
-    2D dimensional target distribution with a banana-shaped joint distribution.
-
-    Attributes
-        ----------
-        mvn : MultivariateNormal
-            Multivariate normal distribution that will be used to evaluate the log probability.
-    """
-
-    def __init__(
-            self
-    ):
-
-        """
-        Banana constructor.
-        """
-        
+    def __init__(self):
         mean = torch.zeros(2)
-        cov = torch.tensor([[1., 0.9], [0.9, 1.]])
+        cov = torch.tensor([[1.0, 0.9], [0.9, 1.0]])
         self.mvn = MultivariateNormal(mean, cov)
 
-    def log_prob(
-            self,
-            x : torch.Tensor
-    ) -> torch.Tensor:
-
-        """
-        Evaluates the log probability of the banana distribution.
-
-        Parameters
-        ----------
-        x : torch.Tensor
-            Point at which to evaluate the log probability density.
-
-        Returns
-        ----------
-        torch.Tensor
-            The log probability density of the banana distribution at the point `x`.
-        """
-        
+    def log_prob(self, x: torch.Tensor) -> torch.Tensor:
         x = torch.atleast_2d(x)
-        y = torch.cat((x[:,0:1], x[:,1:2] + (x[:,0:1] + 1)**2), dim=1)
-        return self.mvn.log_prob(y)
-
-
+        y = torch.cat((x[:, 0:1], x[:, 1:2] + (x[:, 0:1] + 1.0) ** 2), dim=1)
+        return self.mvn.log_prob(y).squeeze()
 
 
 if __name__ == "__main__":
-
-    torch.manual_seed(0) # for reproducibility
-    
     target = Banana()
+    init_sample = torch.tensor([0.0, -1.0])
+    init_cov = torch.tensor([[1.0, 0.9], [0.9, 1.0]])
+    num_samples = 10_000
 
-    init_sample = torch.tensor([0.,-1.])
-    init_cov = torch.tensor([[1., 0.9], [0.9, 1.]])
-
-    num_samples = int(1e4)
-
-
+    g = torch.Generator().manual_seed(0)
     dram = DelayedRejectionAdaptiveMetropolis(
-        target = target.log_prob,
-        x0 = init_sample,
-        cov = init_cov
+        target=target.log_prob,
+        x0=init_sample,
+        cov=init_cov,
+        generator=g,
     )
-    
+
+    g2 = torch.Generator().manual_seed(0)
     hmc = HamiltonianMonteCarlo(
-        target = target.log_prob,
-        x0 = torch.nn.Parameter(init_sample),
-        step_size = 0.2,
-        num_steps = 3
+        target=target.log_prob,
+        x0=init_sample,
+        step_size=0.2,
+        num_steps=3,
+        generator=g2,
     )
 
     samplers = [dram, hmc]
-    titles = ['DRAM', 'HMC']
-    labels = ['$x_1$', '$x_2$']
-    visualizers = [None, None]
+    titles = ["DRAM", "HMC"]
+    labels = ["$x_1$", "$x_2$"]
 
-    for ii, sampler in enumerate(samplers):
-        samples, log_probs = sampler(num_samples)
-        print(f'{titles[ii]} acceptence rate: {100*sampler.acceptance_ratio:.2f}%')
-    
-        visualizers[ii] = SampleVisualizer(samples)
-        visualizers[ii].triangular_hist(bins=50,
-                                   labels=labels,
-                                   titles=[titles[ii]])
-        visualizers[ii].chains(labels=labels,
-                               titles=[titles[ii]])
+    for sampler, title in zip(samplers, titles):
+        samples, _ = sampler(num_samples, burn_in=num_samples // 5)
+        print(f"{title} acceptance rate: {100.0 * sampler.acceptance_ratio:.2f}%")
+        visualizer = SampleVisualizer(samples)
+        visualizer.triangular_hist(bins=50, labels=labels, titles=[title])
+        visualizer.chains(labels=labels, titles=[title])
 
     plt.show()

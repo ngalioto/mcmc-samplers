@@ -1,334 +1,390 @@
-import torch
-from math import sqrt
-from mcmc_samplers import Proposal, Sample
-from typing import Tuple, Union
+"""Gaussian random-walk proposal family.
 
+Includes the basic random walk, the adaptive-covariance variant (Haario et al.
+2001) using Welford-style online statistics, and a scaled wrapper used by the
+delayed-rejection algorithm.
 """
-Defines the `GaussianRandomWalk` base class and all proposals that are derived from it.
-"""
+
+from __future__ import annotations
+
+from math import sqrt
+from typing import Sequence, Union
+
+import torch
+
+from ..samples.sample import Sample
+from .proposal import Proposal
+
+
+def _cholesky_with_jitter(
+    matrix: torch.Tensor,
+    eps: float = 1e-8,
+    max_tries: int = 9,
+) -> torch.Tensor:
+    """Cholesky factorize ``matrix``, adding increasing diagonal jitter on failure.
+
+    Tries ``matrix``, ``matrix + 1e-8 I``, ``matrix + 1e-7 I``, ..., up to
+    ``max_tries`` orders of magnitude before giving up. Always uses the
+    lower-triangular factor.
+
+    Returns
+    -------
+    torch.Tensor
+        Lower-triangular Cholesky factor ``L`` such that ``L @ L.T == matrix``.
+
+    Raises
+    ------
+    torch.linalg.LinAlgError
+        If even the maximally-jittered matrix is not positive-definite.
+    """
+    try:
+        return torch.linalg.cholesky(matrix, upper=False)
+    except RuntimeError:
+        pass
+
+    dim = matrix.shape[-1]
+    identity = torch.eye(dim, device=matrix.device, dtype=matrix.dtype)
+    for ii in range(max_tries):
+        jitter = eps * (10 ** ii)
+        try:
+            return torch.linalg.cholesky(matrix + jitter * identity, upper=False)
+        except RuntimeError:
+            continue
+    raise torch.linalg.LinAlgError(
+        "Cholesky decomposition failed even after jittering up to "
+        f"{eps * 10 ** (max_tries - 1):.2e} on the diagonal."
+    )
+
 
 class GaussianRandomWalk(Proposal):
-    
-    """
-    Generates proposals using a Gaussian random walk.
+    """Gaussian random-walk proposal centered on the current chain state.
 
-    Attributes
-    ---------
-    sqrt_cov : torch.Tensor
-        Lower cholesky decomposition of the covariance of Gaussian proposal
-    dim : int
-        Dimension of the Gaussian proposal
+    Parameters
+    ----------
+    sqrt_cov : torch.Tensor, optional
+        Lower Cholesky factor of the proposal covariance. Must be square.
+        Exactly one of ``sqrt_cov`` or ``cov`` must be provided.
+    cov : torch.Tensor, optional
+        Symmetric positive-definite proposal covariance.
     """
 
     def __init__(
-            self,
-            sqrt_cov : torch.Tensor = None,
-            cov : torch.Tensor = None
+        self,
+        sqrt_cov: torch.Tensor | None = None,
+        cov: torch.Tensor | None = None,
     ):
-        
-        """
-        GaussianRandomWalk constructor.
+        if sqrt_cov is not None and cov is not None:
+            raise ValueError("Provide exactly one of sqrt_cov or cov, not both.")
+        if sqrt_cov is None and cov is None:
+            raise ValueError("GaussianRandomWalk requires either sqrt_cov or cov.")
 
-        Parameters
-        ----------
-        sqrt_cov : torch.Tensor
-            Lower cholesky decomposition of the covariance of Gaussian proposal. Must be 2-dimensional and square.
-        cov : torch.Tensor
-            Covariance matrix of the Gaussian proposal. Must be symmetric and positive-definite.
-        """
-        
         if sqrt_cov is not None:
-            if sqrt_cov.ndim !=2 or sqrt_cov.shape[0] != sqrt_cov.shape[1]:
-                raise ValueError(f'sqrt_cov must be a square matrix but instead it has shape {sqrt_cov.shape}')
-            self.sqrt_cov = sqrt_cov
-        elif cov is not None:
-            try:
-                self.sqrt_cov = torch.linalg.cholesky(cov, upper=False)
-            except:
-                raise ValueError('cov must be a symmetric positive-definite matrix')
+            if sqrt_cov.ndim != 2 or sqrt_cov.shape[0] != sqrt_cov.shape[1]:
+                raise ValueError(
+                    "sqrt_cov must be a square 2D matrix, got shape "
+                    f"{tuple(sqrt_cov.shape)}."
+                )
+            self.sqrt_cov = sqrt_cov.clone()
         else:
-            raise ValueError('GaussianRandomWalk requires either sqrt_cov or cov for initialization')
+            if cov.ndim != 2 or cov.shape[0] != cov.shape[1]:
+                raise ValueError(
+                    f"cov must be a square 2D matrix, got shape {tuple(cov.shape)}."
+                )
+            self.sqrt_cov = _cholesky_with_jitter(cov)
 
-        self.dim = self.sqrt_cov.shape[0]
-        
+        self.dim = int(self.sqrt_cov.shape[0])
+
     @property
-    def is_symmetric(
-            self
-    ) -> bool:
-        
-        """
-        Getter of `is_symmetric` property. 
-
-        Returns
-        ----------
-        bool
-            Gaussian distributions are symmetric, so this always returns `True`
-        """
-        
+    def is_symmetric(self) -> bool:
         return True
 
+    @property
+    def device(self) -> torch.device:
+        return self.sqrt_cov.device
+
+    @property
+    def dtype(self) -> torch.dtype:
+        return self.sqrt_cov.dtype
 
     def propose(
-            self,
-            y : Tuple[Sample, ...],
-            N : int = 1
-    ) -> Union[Sample, Tuple[Sample, ...]]:
-        
+        self,
+        y: Sequence[Sample],
+        N: int = 1,
+        generator: torch.Generator | None = None,
+    ) -> Union[Sample, list]:
+        """Draw ``N`` samples from a Gaussian centered at ``y[0].point``.
+
+        Returns a single :class:`Sample` if ``N == 1`` and a list otherwise.
         """
-        Draws a sample from the Gaussian random walk
+        center = y[0].point
+        eps = torch.randn(
+            N, self.dim, generator=generator, device=self.device, dtype=self.dtype
+        )
+        sample_points = eps @ self.sqrt_cov.T + center
+        if N == 1:
+            return Sample(sample_points.squeeze(0))
+        return [Sample(sample_points[ii]) for ii in range(N)]
 
-        Parameters
-        ----------
-        y : Tuple[Sample, ...]
-            The Gaussian distribution centers itself around the first Sample in this list
-        N : int
-            Number of samples to draw. Default is 1
+    def log_prob(self, y: Sequence[Sample]) -> torch.Tensor:
+        """Un-normalized log-density of moving from ``y[0]`` to ``y[-1]``."""
+        delta = (y[-1].point - y[0].point).unsqueeze(-1)
+        z = torch.linalg.solve_triangular(self.sqrt_cov, delta, upper=False)
+        return -0.5 * z.pow(2).sum()
 
-        Returns
-        ----------
-        Union[Sample, Tuple[Sample, ...]]
-            The samples drawn from the Gaussian random walk.
-            If `N` is 1, a Sample object is returned
-            If `N`>1, a list of Sample objects is returned
-        """
-        
-        sample_points = torch.randn(N, self.dim) @ self.sqrt_cov.T + y[0].point
-        return [Sample(sample_points[ii]) for ii in range(N)] if N > 1 else Sample(sample_points)
+    def state_dict(self) -> dict:
+        return {"sqrt_cov": self.sqrt_cov.detach().clone()}
 
-    def log_prob(
-            self,
-            y : Tuple[Sample, ...]
-    ) -> torch.Tensor:
-        
-        """
-        Evaluates the log probability density of the Gaussian distribution
-
-        Parameters
-        ----------
-        y : Tuple[Sample, ...]
-            List of Samples representing the current state and all proposals for a given iteration ordered from first proposal tier to current proposal tier
-
-        Returns
-        ----------
-        torch.Tensor
-            Log probability density for a Gaussian centered at the first Sample in `y` evaluated at the last Sample in `y`.
-        """
-        
-        return -0.5 * torch.sum(torch.linalg.solve_triangular(self.sqrt_cov, (y[0].point - y[-1].point).T, upper=False)**2, dim=0)
+    def load_state_dict(self, state: dict) -> None:
+        self.sqrt_cov = state["sqrt_cov"].clone()
+        self.dim = int(self.sqrt_cov.shape[0])
 
 
 class AdaptiveCovariance(GaussianRandomWalk):
+    """Gaussian random walk with covariance adapted from the chain history.
 
-    """
-    A Gaussian random walk with covariance that adapts according to the sample covariance. This is a child class of the `GaussianRandomWalk` class.
+    Implements the recursive sample covariance of Haario et al. (2001) using a
+    numerically-stable, exactly-symmetric Welford-style update of the
+    second-order moment. The proposal covariance is held fixed at
+    ``sd * cov_0`` until ``_iteration`` exceeds ``n0``; afterward it becomes
+    ``sd * (M2 / (n - 1) + eps * I)``.
 
-    Attributes
-    ---------
-    sqrt_cov : torch.Tensor
-        Lower cholesky decomposition of the covariance of Gaussian proposal
+    Symmetric Welford update
+        On step ``n``, with the pre-update mean ``mean_{n-1}`` and new sample
+        ``x``, the standard two-pass Welford increment ``outer(delta, delta2)``
+        (where ``delta2 = x - mean_n``) can be rewritten using
+        ``delta2 = (n - 1)/n * delta`` as ``((n - 1) / n) * outer(delta, delta)``.
+        This single rank-one update is symmetric by construction (it cannot
+        drift off-symmetric due to floating-point round-off) and saves a
+        per-step outer product.
+
+    Identity cache
+        After ``n0``, every ``_adapt`` call adds ``eps * I`` to the empirical
+        covariance and Cholesky-decomposes it. Constructing the identity each
+        time is cheap but redundant; ``cache_identity=True`` (the default)
+        keeps a single ``dim x dim`` tensor alongside the running statistics.
+        Set ``cache_identity=False`` to trade the extra ``dim^2`` floats of
+        storage for a fresh allocation each step. (The empirical covariance
+        itself is intentionally *not* cached because scalar multiplication is
+        cheap and a second persistent matrix would double the storage cost.)
+
+    Adapt interval
+        ``adapt_interval=1`` (the default) recomputes ``sqrt_cov`` every
+        post-warmup step so that adaptation stays as responsive as possible
+        and the proposal covariance does not drift between recomputations.
+        Larger values amortize the ``O(dim^3)`` Cholesky over multiple
+        steps -- recommended only when the Cholesky is a measurable
+        bottleneck (e.g. very high-dimensional problems).
+
+    Parameters
+    ----------
     cov : torch.Tensor
-        Covariance matrix of the Gaussian proposal
-    dim : int
-        Dimension of the Gaussian proposal
-    sd : float
-        Scaling factor of the proposal covariance.
+        Initial proposal covariance used while ``_iteration <= n0``.
+    sd : float, optional
+        Global scale factor. Defaults to ``2.4 ** 2 / dim`` (Roberts et al. 2001).
     n0 : int
-        Number of Markov chain iterations before using adaptive covariance
+        Number of samples to observe before adaptation kicks in.
     eps : float
-        Small positive value to add to covariance diagonal during adaptation to encourage positive-definiteness
-    iteration : int
-        The iteration number.
-    mean : torch.Tensor
-        The running sample mean
+        Small positive value added to the empirical covariance diagonal to
+        keep it positive-definite.
+    cache_identity : bool, optional
+        If True (default), keep a single cached ``dim x dim`` identity matrix
+        to avoid re-allocating it on every ``_adapt`` call. Set to False to
+        save ``dim^2`` floats of memory at a tiny per-iteration cost.
+    adapt_interval : int, optional
+        Recompute the Cholesky factor every ``adapt_interval`` post-warmup
+        steps. Default ``1`` (recompute every step). Must be ``>= 1``.
     """
 
     def __init__(
-            self,
-            cov : torch.Tensor,
-            sd : float = None,
-            n0 : int = 200,
-            eps : float = 1e-8
+        self,
+        cov: torch.Tensor,
+        sd: float | None = None,
+        n0: int = 200,
+        eps: float = 1e-8,
+        cache_identity: bool = True,
+        adapt_interval: int = 1,
     ):
-        
-        """
-        AdaptiveCovariance constructor.
+        super().__init__(cov=cov)
+        if adapt_interval < 1:
+            raise ValueError(
+                f"adapt_interval must be >= 1, got {adapt_interval}"
+            )
+        self.sd = (2.4 ** 2) / self.dim if sd is None else float(sd)
+        self.sqrt_cov = self.sqrt_cov * sqrt(self.sd)
+        self._cov_0 = cov.clone() * self.sd
+        self.n0 = int(n0)
+        self.eps = float(eps)
+        self.cache_identity = bool(cache_identity)
+        self.adapt_interval = int(adapt_interval)
 
-        Parameters
-        ----------
-        cov : torch.Tensor
-            Covariance matrix of the Gaussian proposal. Must be 2-dimensional and square.
-        sd : float
-            Scaling factor of proposal covariance. If `None`, the default value is $2.4^2 / d$, where $d$ is the proposal dimension.
-        n0 : int
-            Number of Markov chain iterations before using adaptive covariance. Default is 200
-        eps : float
-            Small positive value to be added to the covariance diagonal during adaptation to encourage positive-definiteness. Default is 1e-8
-        """
-
-        super().__init__(cov = cov)
-        self.sd = 2.4**2 / self.dim if sd is None else sd
-        self.sqrt_cov *= sqrt(self.sd)
-        self.cov = cov * self.sd
-        self.n0 = n0
-        self.eps = eps
-        
-        self.iteration = 0
-        self.mean = torch.zeros(self.dim)
+        self._iteration = 0
+        self._mean = torch.zeros(self.dim, device=self.device, dtype=self.dtype)
+        self._M2 = torch.zeros(
+            self.dim, self.dim, device=self.device, dtype=self.dtype
+        )
+        self._identity = (
+            torch.eye(self.dim, device=self.device, dtype=self.dtype)
+            if self.cache_identity
+            else None
+        )
 
     @property
-    def cov(
-            self
-    ) -> torch.Tensor:
-        
+    def iteration(self) -> int:
+        """Number of adaptation steps performed so far (read-only)."""
+        return self._iteration
+
+    @property
+    def mean(self) -> torch.Tensor:
+        """Running sample mean (read-only clone)."""
+        return self._mean.clone()
+
+    def _eye(self) -> torch.Tensor:
+        """Return a ``dim x dim`` identity, cached if ``cache_identity=True``."""
+        if self._identity is not None:
+            return self._identity
+        return torch.eye(self.dim, device=self.device, dtype=self.dtype)
+
+    @property
+    def cov(self) -> torch.Tensor:
+        """Current proposal covariance.
+
+        Returns the (scaled) initial covariance until ``_iteration > n0``;
+        afterwards returns the (scaled, jittered) empirical sample covariance.
         """
-        Getter for the `cov` property.
+        if self._iteration > self.n0 and self._iteration > 1:
+            empirical = self._M2 / (self._iteration - 1)
+            return self.sd * (empirical + self.eps * self._eye())
+        return self._cov_0
 
-        Returns
-        ----------
-        torch.Tensor
-            If `iteration`>`n0`, the sample covariance is returned. Otherwise, the initial covariance is returned.
+    def _adapt(self, x: torch.Tensor) -> None:
+        """Update running mean and second-moment with the new sample ``x``.
+
+        Refreshes ``sqrt_cov`` once per ``adapt_interval`` post-``n0`` calls.
         """
-        
-        if self.iteration > self.n0:
-            return self._cov_ii
-        else:
-            return self._cov_0
+        x = x.detach()
+        self._iteration += 1
+        n = self._iteration
+        delta = x - self._mean
+        self._mean = self._mean + delta / n
+        # Symmetric Welford update: outer(delta, delta - delta/n) =
+        # ((n-1)/n) * outer(delta, delta). One rank-one outer, exactly symmetric.
+        if n > 1:
+            scale = (n - 1) / n
+            self._M2 = self._M2 + scale * torch.outer(delta, delta)
 
-    @cov.setter
-    def cov(
-        self,
-        value : torch.Tensor
-    ):
-        
-        """
-        Setter for the `cov` property
-
-        Parameters
-        ----------
-        value : torch.Tensor
-            A covariance matrix.
-        """
-        
-        self._cov_0 = value
-        self._cov_ii = value.clone()
-
-
-    def _adapt(
-            self,
-            x : torch.Tensor
-    ):
-        
-        """
-        Adaptation algorithm for updating the adaptive covariance. Updates the sample mean `mean` and covariance `_cov_ii`
-
-        Parameters
-        ----------
-        x : torch.Tensor
-            The most recent state value in the Markov chain.
-        """
-        
-        self.iteration += 1
-
-        self._cov_ii *= ((self.iteration - 1) / self.iteration)
-        outer = self.iteration * torch.outer(self.mean, self.mean) + torch.outer(x, x)
-        
-        self.mean = (self.mean * (self.iteration - 1) + x) / self.iteration
-        
-        outer_mean = (self.iteration + 1) * torch.outer(self.mean, self.mean)
-
-        self._cov_ii += (self.sd / self.iteration) * (outer - outer_mean + self.eps * torch.eye(self.dim))
-
-        if self.iteration > self.n0:
+        if n > self.n0 and ((n - self.n0) % self.adapt_interval == 0):
             try:
-                self.sqrt_cov = torch.linalg.cholesky(self._cov_ii, upper=False)
-            except:
-                for ii in range(-8, 1, -1):
-                    try:
-                        self._cov_ii += torch.diag(10^(ii)*torch.ones(self.dim))
-                        self.sqrt_cov = torch.linalg.cholesky(self._cov_ii, upper=False)
-                        break
-                    except:
-                        pass
+                self.sqrt_cov = _cholesky_with_jitter(self.cov, eps=self.eps)
+            except torch.linalg.LinAlgError:
+                pass
 
     def propose(
-            self,
-            y : Tuple[Sample, ...],
-            N : int = 1
-    ) -> Union[Sample, Tuple[Sample, ...]]:
-        
-        """
-        Generates a proposed state from the Gaussian random walk with adaptive covariance.
+        self,
+        y: Sequence[Sample],
+        N: int = 1,
+        generator: torch.Generator | None = None,
+    ) -> Union[Sample, list]:
+        return super().propose(y, N=N, generator=generator)
 
-        Parameters
-        ----------
-        y : Tuple[Sample, ...]
-            A list of Sample objects containing the current state and proposals from each proposal tier
-        N : int
-            Number of proposed states to draw. Default is 1
+    def state_dict(self) -> dict:
+        return {
+            "sqrt_cov": self.sqrt_cov.detach().clone(),
+            "cov_0": self._cov_0.detach().clone(),
+            "iteration": self._iteration,
+            "mean": self._mean.detach().clone(),
+            "M2": self._M2.detach().clone(),
+            "sd": self.sd,
+            "n0": self.n0,
+            "eps": self.eps,
+            "cache_identity": self.cache_identity,
+            "adapt_interval": self.adapt_interval,
+        }
 
-        Returns
-        ----------
-        Union[Sample, Tuple[Sample, ...]]
-            Returns the proposed state wrapped inside a Sample object if `N` is 1. Otherwise, returns a list of Sample objects, each containing a proposed state
-        """
-        
-        return super().propose(y,N)
+    def load_state_dict(self, state: dict) -> None:
+        self.sqrt_cov = state["sqrt_cov"].clone()
+        self._cov_0 = state["cov_0"].clone()
+        self._iteration = int(state["iteration"])
+        self._mean = state["mean"].clone()
+        self._M2 = state["M2"].clone()
+        self.sd = float(state["sd"])
+        self.n0 = int(state["n0"])
+        self.eps = float(state["eps"])
+        self.cache_identity = bool(state.get("cache_identity", True))
+        self.adapt_interval = int(state.get("adapt_interval", 1))
+        self.dim = int(self.sqrt_cov.shape[0])
+        self._identity = (
+            torch.eye(self.dim, device=self.device, dtype=self.dtype)
+            if self.cache_identity
+            else None
+        )
 
 
 class ScaledCovariance(GaussianRandomWalk):
+    """Gaussian random walk whose covariance is a scaled view of another's.
 
+    Used by delayed rejection: stage-2 covariance is ``gamma`` times the
+    stage-1 (typically adaptive) covariance. Because this only reads from the
+    underlying proposal, scale adaptation is automatic.
+
+    Parameters
+    ----------
+    covariance : GaussianRandomWalk
+        Underlying proposal whose ``sqrt_cov`` is read on demand.
+    gamma : float
+        Scale factor applied to the underlying ``sqrt_cov`` (covariance is
+        scaled by ``gamma`` so the Cholesky factor is scaled by ``sqrt(gamma)``).
     """
-    Wraps a GaussianRandomWalk
-    """
 
-    def __init__(
-            self,
-            covariance : GaussianRandomWalk,
-            gamma : float = 1e-2
-    ):
-        
-        """
-        ScaledCovariance constructor.
-
-        Parameters
-        ----------
-        covariance : GaussianRandomWalk
-            The Gaussian random walk proposal to be scaled.
-        gamma : float
-            The scaling factor for the second-stage proposal covariance. Default is 1e-2.
-        """
-        
+    def __init__(self, covariance: GaussianRandomWalk, gamma: float = 1e-2):
+        if gamma <= 0:
+            raise ValueError(f"gamma must be positive, got {gamma}")
         self.covariance = covariance
-        self.sqrt_gamma = sqrt(gamma)
+        self.gamma = float(gamma)
+        self.sqrt_gamma = sqrt(self.gamma)
 
     @property
-    def sqrt_cov(
-            self
-    ) -> torch.Tensor:
-        
-        """
-        Getter for the `sqrt_cov` property. 
+    def is_symmetric(self) -> bool:
+        return True
 
-        Returns
-        ----------
-        torch.Tensor
-            The `sqrt_cov` property of the wrapped GaussianRandomWalk object scaled by `sqrt_gamma`.
-        """
-        
+    @property
+    def sqrt_cov(self) -> torch.Tensor:
         return self.covariance.sqrt_cov * self.sqrt_gamma
 
     @property
-    def dim(
-            self
-    ) -> int:
-        
-        """
-        Getter for the `dim` property. 
-
-        Returns
-        ----------
-        int
-            The `dim` property of the wrapped GaussianRandomWalk object.
-        """
-        
+    def dim(self) -> int:
         return self.covariance.dim
+
+    @property
+    def device(self) -> torch.device:
+        return self.covariance.device
+
+    @property
+    def dtype(self) -> torch.dtype:
+        return self.covariance.dtype
+
+    def propose(
+        self,
+        y: Sequence[Sample],
+        N: int = 1,
+        generator: torch.Generator | None = None,
+    ) -> Union[Sample, list]:
+        center = y[0].point
+        eps = torch.randn(
+            N, self.dim, generator=generator, device=self.device, dtype=self.dtype
+        )
+        sample_points = eps @ self.sqrt_cov.T + center
+        if N == 1:
+            return Sample(sample_points.squeeze(0))
+        return [Sample(sample_points[ii]) for ii in range(N)]
+
+    def log_prob(self, y: Sequence[Sample]) -> torch.Tensor:
+        delta = (y[-1].point - y[0].point).unsqueeze(-1)
+        z = torch.linalg.solve_triangular(self.sqrt_cov, delta, upper=False)
+        return -0.5 * z.pow(2).sum()
+
+    def state_dict(self) -> dict:
+        return {"gamma": self.gamma}
+
+    def load_state_dict(self, state: dict) -> None:
+        self.gamma = float(state["gamma"])
+        self.sqrt_gamma = sqrt(self.gamma)

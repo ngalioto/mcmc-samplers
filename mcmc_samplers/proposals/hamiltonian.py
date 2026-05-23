@@ -1,155 +1,265 @@
-import torch
-from torch.nn import Parameter
-from mcmc_samplers import Proposal, HamiltonianSample, Sample
-from torch.distributions.multivariate_normal import MultivariateNormal
-from typing import Tuple
-from collections.abc import Callable
+"""Hamiltonian dynamics proposal for HMC and NUTS.
 
+The proposal integrates Hamilton's equations with the leapfrog scheme, given
+a target log-density (the negative potential energy) and an auxiliary momentum
+sampled from a Gaussian whose covariance is the user-specified mass matrix.
 """
-Defines the HamiltonianDynamics class as a child of the `Proposal` base class.
-"""
+
+from __future__ import annotations
+
+from collections.abc import Callable
+from math import sqrt
+from typing import Sequence
+
+import torch
+
+from ..samples.hamiltonian import HamiltonianSample
+from ..samples.sample import Sample
+from ..utils.autograd import log_prob_and_grad
+from .gaussian_random_walk import _cholesky_with_jitter
+from .proposal import Proposal
+
 
 class HamiltonianDynamics(Proposal):
-    
-    '''
-    Proposal using Hamiltonian dynamics.
+    """Proposal that integrates Hamiltonian dynamics with leapfrog.
 
-    Attributes
+    Parameters
     ----------
-    target : Callable[[torch.Tensor], [torch.Tensor]]
-        Function that evaluates the log probability of the target distribution. In the Hamiltonian dyanmics, this represents the negative potential energy.
+    target : Callable
+        Log-density of the target distribution. Equivalently, the negative
+        potential energy ``-U(q)``.
     dim : int
-        Dimension of the sampler.
+        Dimensionality of the position variable.
     step_size : float
-        Step size to use to integrate the Hamiltonian dynamics.
+        Leapfrog step size (commonly ``epsilon``).
     num_steps : int
-        Number of steps to integrate the Hamiltonian dynamics.
-    kinetic_energy : torch.Distribution.MultivariateNormal
-        The negative log of this distribution represents the kinetic energy.
-    '''
-    
+        Number of leapfrog steps per proposal (commonly ``L``).
+    mass : torch.Tensor or None
+        Mass matrix ``M`` used for the kinetic energy
+        ``K(p) = 0.5 * p^T M^{-1} p``. ``None`` (default) means identity.
+        A 1-D tensor is interpreted as a diagonal mass; a 2-D tensor as a
+        full matrix. The momentum sample distribution is ``N(0, M)``.
+    device, dtype : optional
+        Device and dtype for sampled momenta. Inferred from ``mass`` when
+        provided.
+    """
+
     def __init__(
-            self,
-            target : Callable[[torch.Tensor], [torch.Tensor]],
-            dim : int,
-            step_size : float = 1e-1,
-            num_steps : int = 1
+        self,
+        target: Callable[[torch.Tensor], torch.Tensor],
+        dim: int,
+        step_size: float = 1e-1,
+        num_steps: int = 1,
+        mass: torch.Tensor | None = None,
+        device: torch.device | None = None,
+        dtype: torch.dtype | None = None,
     ):
-
-        """
-        Description
-
-        Parameters
-        ----------
-        target : Callable[[torch.Tensor], [torch.Tensor]]
-            Function that evaluates the log probability of the target distribution. In the Hamiltonian dyanmics, this represents the negative potential energy.
-        dim : int
-            Dimension of the sampler.
-        step_size : float
-            Step size to use to integrate the Hamiltonian dynamics. Default is 1e-1.
-        num_steps : int
-            Number of steps to integrate the Hamiltonian dynamics. Default is 1.
-        """
+        if step_size <= 0:
+            raise ValueError(f"step_size must be positive, got {step_size}")
+        if num_steps < 1:
+            raise ValueError(f"num_steps must be >= 1, got {num_steps}")
 
         self.target = target
-        self.dim = dim
-        self.step_size = step_size
-        self.num_steps = num_steps
+        self.dim = int(dim)
+        self.step_size = float(step_size)
+        self.num_steps = int(num_steps)
 
-        self.kinetic_energy = MultivariateNormal(
-            loc = torch.zeros(self.dim),
-            covariance_matrix = torch.eye(self.dim)
-        )
+        if mass is None:
+            self._device = device if device is not None else torch.device("cpu")
+            self._dtype = dtype if dtype is not None else torch.get_default_dtype()
+            self._mass = None
+            self._mass_inv = None
+            self._sqrt_mass = None
+        else:
+            self._device = device if device is not None else mass.device
+            self._dtype = dtype if dtype is not None else mass.dtype
+            self._set_mass(mass)
 
     @property
-    def is_symmetric(
-            self
-    ) -> bool:
+    def device(self) -> torch.device:
+        return self._device
 
-        """
-        Getter for property `is_symmetric`. 
+    @property
+    def dtype(self) -> torch.dtype:
+        return self._dtype
 
-        Returns
-        ----------
-        bool
-            The Hamiltonian dynamics proposal is not symmetric, so value is always False.
-        """
-        
+    @property
+    def is_symmetric(self) -> bool:
         return False
 
-    def _leapfrog(
-            self,
-            y : HamiltonianSample
-    ) -> HamiltonianSample:
+    @property
+    def mass(self) -> torch.Tensor | None:
+        return None if self._mass is None else self._mass.clone()
 
-        """
-        Leapfrog integrator.
+    def set_mass(self, mass: torch.Tensor | None) -> None:
+        """Update the mass matrix; ``None`` resets to identity."""
+        if mass is None:
+            self._mass = None
+            self._mass_inv = None
+            self._sqrt_mass = None
+            return
+        self._set_mass(mass)
+
+    def _set_mass(self, mass: torch.Tensor) -> None:
+        mass = mass.to(device=self._device, dtype=self._dtype)
+        if mass.ndim == 1:
+            if mass.shape[0] != self.dim:
+                raise ValueError(
+                    f"diagonal mass must have shape ({self.dim},), got "
+                    f"{tuple(mass.shape)}"
+                )
+            if torch.any(mass <= 0):
+                raise ValueError("diagonal mass entries must be positive")
+            self._mass = mass.clone()
+            self._mass_inv = 1.0 / mass
+            self._sqrt_mass = mass.sqrt()
+        elif mass.ndim == 2:
+            if mass.shape != (self.dim, self.dim):
+                raise ValueError(
+                    f"mass matrix must be ({self.dim}, {self.dim}), got "
+                    f"{tuple(mass.shape)}"
+                )
+            self._mass = mass.clone()
+            chol = _cholesky_with_jitter(mass)
+            self._sqrt_mass = chol
+            identity = torch.eye(self.dim, device=self._device, dtype=self._dtype)
+            self._mass_inv = torch.cholesky_solve(identity, chol, upper=False)
+        else:
+            raise ValueError("mass must be 1-D (diagonal) or 2-D (full).")
+
+    def _sample_momentum(
+        self, generator: torch.Generator | None = None
+    ) -> torch.Tensor:
+        eps = torch.randn(
+            self.dim, generator=generator, device=self._device, dtype=self._dtype
+        )
+        if self._mass is None:
+            return eps
+        if self._sqrt_mass.ndim == 1:
+            return self._sqrt_mass * eps
+        return self._sqrt_mass @ eps
+
+    def kinetic_energy(self, p: torch.Tensor) -> torch.Tensor:
+        """Return ``0.5 * p^T M^{-1} p`` (the kinetic energy)."""
+        if self._mass_inv is None:
+            return 0.5 * p.pow(2).sum()
+        if self._mass_inv.ndim == 1:
+            return 0.5 * (self._mass_inv * p * p).sum()
+        return 0.5 * (p @ self._mass_inv @ p)
+
+    def _momentum_to_velocity(self, p: torch.Tensor) -> torch.Tensor:
+        if self._mass_inv is None:
+            return p
+        if self._mass_inv.ndim == 1:
+            return self._mass_inv * p
+        return self._mass_inv @ p
+
+    def leapfrog(
+        self,
+        q: torch.Tensor,
+        p: torch.Tensor,
+        grad: torch.Tensor,
+        step_size: float | None = None,
+        num_steps: int | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Integrate Hamilton's equations forward ``num_steps`` leapfrog steps.
 
         Parameters
         ----------
-        y : HamiltonianSample
-            The current position and momentum of the sampler stored as a HamiltonianSample object.
+        q : torch.Tensor
+            Initial position (1-D, will be detached internally).
+        p : torch.Tensor
+            Initial momentum (1-D).
+        grad : torch.Tensor
+            Gradient of ``target`` at ``q``.
+        step_size : float, optional
+            Override the configured ``step_size``.
+        num_steps : int, optional
+            Override the configured ``num_steps``.
 
         Returns
-        ----------
-        HamiltonianSample
-            The position and momentum approximately integrated `self.step_size * self.num_steps` forward in time and stored in a HamiltonianSample object.
+        -------
+        q, p, log_prob, grad : torch.Tensor
+            New position, new momentum, log-density at new position, and the
+            gradient at the new position.
         """
+        h = self.step_size if step_size is None else float(step_size)
+        L = self.num_steps if num_steps is None else int(num_steps)
 
-        q = Sample(y.point.detach().clone())
-        p = y.p.clone()
+        q = q.detach().clone()
+        p = p.detach().clone()
+        grad = grad.detach().clone()
 
-        # Integrate for `self.num_steps` steps
-        p = p + (self.step_size / 2) * y.point.grad
-        for ii in range(self.num_steps):
-            q.point = Parameter(q.point + self.step_size * p)
-            q.log_prob = self.target(q.point)
-            q.log_prob.backward()
-            if ii != self.num_steps - 1:
-                p = p + self.step_size * q.point.grad
-        p = p + (self.step_size / 2) * q.point.grad
-        
-        return HamiltonianSample(q, p)
+        p = p + 0.5 * h * grad
+        log_prob = None
+        for ii in range(L):
+            q = q + h * self._momentum_to_velocity(p)
+            log_prob, grad = log_prob_and_grad(self.target, q)
+            if ii != L - 1:
+                p = p + h * grad
+        p = p + 0.5 * h * grad
+
+        return q, p, log_prob, grad
 
     def propose(
-            self,
-            y : Tuple[HamiltonianSample, ...]
+        self,
+        y: Sequence[Sample],
+        N: int = 1,
+        generator: torch.Generator | None = None,
     ) -> HamiltonianSample:
+        """Sample a momentum and integrate from the current position.
 
+        Only ``N == 1`` is supported by Hamiltonian dynamics (one trajectory
+        per proposal). ``y[0]`` must be a ``HamiltonianSample`` with ``log_prob``
+        and ``grad`` populated.
         """
-        Proposes a sample using Hamiltonian dynamics.
+        if N != 1:
+            raise ValueError(
+                "HamiltonianDynamics only supports a single proposal per call "
+                f"(got N={N})."
+            )
 
-        Parameters
-        ----------
-        y : Tuple[HamiltonianSample, ...]
-            List of current and proposed HamiltonianSample objects
+        current = y[0]
+        if current.grad is None:
+            log_prob, grad = log_prob_and_grad(self.target, current.point)
+            current.log_prob = log_prob
+            current.grad = grad
 
-        Returns
-        ----------
-        HamiltonianSample
-            Proposed sample consisting of a position and momentum variable.
+        p0 = self._sample_momentum(generator=generator)
+        current.p = p0
+
+        q_new, p_new, log_prob_new, grad_new = self.leapfrog(
+            current.point, p0, current.grad
+        )
+
+        return HamiltonianSample(
+            point=q_new,
+            log_prob=log_prob_new,
+            grad=grad_new,
+            p=p_new,
+        )
+
+    def log_prob(self, y: Sequence[Sample]) -> torch.Tensor:
+        """Log-density of the proposal kernel q(y[0] -> y[-1]).
+
+        For HMC the proposal density is determined by the momentum sampled at
+        the starting point: q(y[0] -> y[-1]) is proportional to N(p_0 | 0, M),
+        where p_0 is the momentum carried by ``y[0]``. The choice of momentum
+        sign cancels because the kinetic energy is even. Returning
+        ``-K(y[0].p)`` (instead of ``-K(y[-1].p)``) is what makes the resulting
+        Metropolis ratio reduce to the standard Hamiltonian-difference form
+        ``log_pi(q_1) - log_pi(q_0) + K(p_0) - K(p_1)``.
         """
+        return -self.kinetic_energy(y[0].p)
 
-        y[0].p = self.kinetic_energy.sample()
-        return self._leapfrog(y[0])
+    def state_dict(self) -> dict:
+        return {
+            "step_size": self.step_size,
+            "num_steps": self.num_steps,
+            "mass": None if self._mass is None else self._mass.detach().clone(),
+        }
 
-    def log_prob(
-            self,
-            y : Tuple[HamiltonianSample, ...] = None
-    ) -> torch.Tensor:
-
-        """
-        Evaluates the log probability of the proposal kernel.
-
-        Parameters
-        ----------
-        y : Tuple[HamiltonianSample, ...]
-            List of current and proposed HamiltonianSample objects.
-
-        Returns
-        ----------
-        torch.Tensor
-            Log probability density of the proposal. Equivalent to the negative kinetic energy function.
-        """
-
-        return self.kinetic_energy.log_prob(y[-1].p)
+    def load_state_dict(self, state: dict) -> None:
+        self.step_size = float(state["step_size"])
+        self.num_steps = int(state["num_steps"])
+        self.set_mass(state.get("mass"))

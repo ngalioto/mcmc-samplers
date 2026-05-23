@@ -1,163 +1,257 @@
-import torch
-from mcmc_samplers import Proposal, Sample
-from abc import ABC
-from tqdm import tqdm
-from collections.abc import Callable
-from typing import Union, Tuple
+"""Sampler abstract base class for MCMC algorithms."""
 
-"""
-Defines the Sampler abstract base class. Sampler objects are used to execute MCMC algorithms.
-"""
+from __future__ import annotations
+
+from abc import ABC
+from collections.abc import Callable
+from typing import Sequence, Tuple, Union
+
+import torch
+from tqdm import tqdm
+
+from ..proposals.proposal import Proposal
+from ..samples.sample import Sample
+
+
+AcceptanceKernel = Callable[[Sequence[Sample]], torch.Tensor]
+
 
 class Sampler(ABC):
-    
-    """
-    Abstract base class of the Sampler class.
+    """Abstract base class for MCMC samplers.
 
-    Attributes
+    A sampler is a (proposal, acceptance-kernel) pipeline plus chain state.
+    Concrete subclasses implement specific algorithms by composing one or more
+    proposals and acceptance kernels.
+
+    Parameters
     ----------
-    target : Callable[[torch.Tensor], [torch.Tensor]]
-        Function that evaluates the log probability density of a target distribution.
-    x : Sample
-        Sample representing the current position of the Markov chain
-    proposals : Tuple[Proposal, ...]
-        List of proposals.
-    acceptance_kernels : Tuple[Callable[[Tuple[Sample, ...]],[torch.Tensor]], ...]
-        List of acceptance kernels. 
+    target : Callable
+        Function mapping a 1-D tensor of shape ``(dim,)`` to a 0-D log-density.
+    x0 : Sample or torch.Tensor
+        Initial chain state. A bare tensor is interpreted as the point and the
+        target is called to populate ``log_prob``.
+    proposals : sequence of Proposal
+        Ordered list of proposals (multiple stages = delayed rejection).
+    acceptance_kernels : sequence of callables
+        One per proposal stage. Each receives the current ``[x, y_1, ...]`` and
+        returns a 0-D log-acceptance ratio (i.e. ``log(min(1, ratio))``).
+    generator : torch.Generator, optional
+        Per-sampler RNG used for ``randn``/``rand`` calls. A fresh ``Generator``
+        is created when ``None``; seed it explicitly for reproducible runs.
+    noisy : bool
+        If true, periodically re-evaluate ``target`` at the current point to
+        absorb stochastic-likelihood noise (see Sherlock et al. 2017). Useful
+        with simulation-based likelihoods.
+    reeval : int
+        Number of consecutive rejections before triggering a re-evaluation.
     """
 
     def __init__(
-            self,
-            target : Callable[[torch.Tensor], torch.Tensor],
-            x0 : Union[Sample, torch.Tensor],
-            proposals : Tuple[Proposal, ...],
-            acceptance_kernels : Tuple[Callable[[Sample, Tuple[Sample, ...]],torch.Tensor], ...],
-            noisy : bool = False,
-            reeval : int = 200
+        self,
+        target: Callable[[torch.Tensor], torch.Tensor],
+        x0: Union[Sample, torch.Tensor],
+        proposals: Sequence[Proposal],
+        acceptance_kernels: Sequence[AcceptanceKernel],
+        generator: torch.Generator | None = None,
+        noisy: bool = False,
+        reeval: int = 200,
     ):
-        
-        """
-        Sampler constructor.
+        if len(proposals) != len(acceptance_kernels):
+            raise ValueError(
+                "proposals and acceptance_kernels must have the same length"
+            )
 
-        Parameters
-        ----------
-        target : Callable[[torch.Tensor], [torch.Tensor]]
-            evaluates the log probability of the target distribution.
-        x0 : Union[Sample, torch.Tensor]
-            point at which to initialize the Markov chain
-        proposals : Tuple[Proposal, ...]
-            list of proposals. 
-        acceptance_kernels : Tuple[Callable[[Sample, Tuple[Sample, ...]],[torch.Tensor]], ...]
-            list of acceptance kernels. Each acceptance kernel evaluates the log acceptance probability of a proposed sample given the current position of the Markov chain (and possibly given rejected proposals at earlier stages)
-        """
-
-        self.acceptance_ratio = 0
         self.target = target
-        self.x = torch.atleast_2d(x0)
-        self.proposals = proposals
-        self.acceptance_kernels = acceptance_kernels
-        self.noisy = noisy
-        self.reeval = reeval
+        self.proposals = tuple(proposals)
+        self.acceptance_kernels = tuple(acceptance_kernels)
+        self.generator = generator if generator is not None else torch.Generator()
+        self.noisy = bool(noisy)
+        self.reeval = int(reeval)
+
+        self.acceptance_ratio = 0.0
+        self._step = 0
+        self.x = x0
 
     @property
-    def x(
-            self
-    ) -> Sample:
-        
-        """
-        Getter for the property `x`
-
-        Returns
-        ----------
-        Sample
-            the current position of the Markov chain.
-        """
-        
+    def x(self) -> Sample:
         return self._x
 
     @x.setter
-    def x(
-            self,
-            value : Union[Sample, torch.Tensor]
-    ):
-        
-        """
-        Setter for the property `x`.
-
-        Parameters
-        ----------
-        value : Union[Sample, torch.Tensor]
-            Markov chain state at which to position the sampler.
-        """
-        
+    def x(self, value: Union[Sample, torch.Tensor]) -> None:
         if isinstance(value, Sample):
+            point = value.point
+            if point.ndim != 1:
+                point = point.reshape(-1)
             self._x = value
-            if value.log_prob is None:
-                self._x.log_prob = self.target(value.point)
+            self._x.point = point
+            if self._x.log_prob is None:
+                self._x.log_prob = self._eval_target(point)
         elif isinstance(value, torch.Tensor):
-            self._x = Sample(value, self.target(value))
+            point = value if value.ndim == 1 else value.reshape(-1)
+            log_prob = self._eval_target(point)
+            self._x = Sample(point=point.detach(), log_prob=log_prob)
         else:
-            raise ValueError(f'x must be of type either Sample or torch.Tensor')
+            raise TypeError(
+                f"x must be a Sample or torch.Tensor, got {type(value).__name__}"
+            )
 
-    def _sample(
-            self
-    ) -> int:
-        
-        """
-        Advances the Markov chain forward one step
+    def _eval_target(self, point: torch.Tensor) -> torch.Tensor:
+        """Evaluate the user's target at ``point`` and coerce to a 0-D tensor."""
+        lp = self.target(point).detach()
+        return lp.squeeze() if lp.ndim > 0 else lp
 
-        Returns
-        ----------
-        int
-            1 if a proposed sample is accepted. In this case the sampler moves its position to the accepted point
-            0 if all proposed samples are rejected. In this case, the sampler remains in its current state.
+    @property
+    def dim(self) -> int:
+        return int(self._x.point.shape[-1])
+
+    @property
+    def device(self) -> torch.device:
+        return self._x.point.device
+
+    @property
+    def dtype(self) -> torch.dtype:
+        return self._x.point.dtype
+
+    def _log_rand(self) -> torch.Tensor:
+        u = torch.rand(1, generator=self.generator, device=self.device, dtype=self.dtype)
+        return torch.log(u)
+
+    def _reeval_log_prob(self) -> None:
+        """Re-evaluate the target log-density at the current point.
+
+        Subclasses override to also refresh cached gradients (e.g. HMC).
         """
-        
-        y = [self.x]
-        for proposal, acceptance_prob in zip(self.proposals, self.acceptance_kernels):
-            y.append(proposal.propose(y))
-            alpha = acceptance_prob(y)
-            if alpha > torch.log(torch.rand(1)): # accept
+        self._x.log_prob = self._eval_target(self._x.point)
+
+    def _sample(self) -> int:
+        """Advance the chain by one MCMC step. Returns 1 on accept, 0 on reject."""
+        y: list[Sample] = [self._x]
+        for proposal, acceptance_kernel in zip(
+            self.proposals, self.acceptance_kernels
+        ):
+            y.append(proposal.propose(y, generator=self.generator))
+            alpha = acceptance_kernel(y)
+            if alpha > self._log_rand():
                 self.x = y[-1]
                 return 1
-        return 0 # proposal rejected at every stage
+        return 0
 
     def __call__(
-            self,
-            N : int = 1,
-            show_progress : bool = True
+        self,
+        N: int = 1,
+        burn_in: int = 0,
+        thin: int = 1,
+        callback: Callable[[int, Sample, int], None] | None = None,
+        show_progress: bool = True,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        
-        """
-        Runs the sampler for as long as specified.
+        """Run the chain.
 
         Parameters
         ----------
         N : int
-            Number of steps to advance the sampler. Default is 1
+            Total number of MCMC steps to take, including burn-in.
+        burn_in : int
+            Number of leading samples to discard. Must satisfy ``0 <= burn_in < N``.
+        thin : int
+            Keep every ``thin``-th post-burn-in sample. Must be ``>= 1``.
+        callback : callable, optional
+            ``callback(step, sample, accepted)`` invoked after every MCMC step
+            (including burn-in). ``step`` is the 0-indexed iteration, ``sample``
+            is the chain state after the step, and ``accepted`` is 0/1.
+        show_progress : bool
+            Whether to display a tqdm progress bar.
 
         Returns
-        ----------
-        Tuple[torch.Tensor, torch.Tensor]
-            The first return object is a tensor representing the Markov chain over `N` iterations
-            The second return object is a tensor holding the `target` log probability values of each state in the Markov chain.
+        -------
+        samples : torch.Tensor
+            Tensor of kept samples, shape ``((N - burn_in) // thin, dim)``.
+        log_probs : torch.Tensor
+            Target log-density at each kept sample, shape
+            ``((N - burn_in) // thin,)``.
         """
+        if N < 1:
+            raise ValueError(f"N must be >= 1, got {N}")
+        if burn_in < 0 or burn_in >= N:
+            raise ValueError(f"burn_in must satisfy 0 <= burn_in < N, got {burn_in}")
+        if thin < 1:
+            raise ValueError(f"thin must be >= 1, got {thin}")
 
         rejection_streak = 0
+        kept = max((N - burn_in + thin - 1) // thin, 0)
+        samples = torch.zeros(kept, self.dim, device=self.device, dtype=self.dtype)
+        log_probs = torch.zeros(kept, device=self.device, dtype=self.dtype)
 
-        samples = torch.zeros(N, self.x.point.shape[1])
-        log_probs = torch.zeros(N)
-        for ii in tqdm(range(N)) if show_progress else range(N):
-            accept = self._sample()
-            self.acceptance_ratio = (ii * self.acceptance_ratio + accept) / (ii+1)
-            samples[ii] = self.x.point.detach()
+        iterator = range(N)
+        if show_progress:
+            iterator = tqdm(iterator, total=N)
+
+        keep_idx = 0
+        for ii in iterator:
+            accepted = self._sample()
+            self._step += 1
+            self.acceptance_ratio = (
+                (self._step - 1) * self.acceptance_ratio + accepted
+            ) / self._step
 
             if self.noisy:
-                rejection_streak = 0 if accept else rejection_streak + 1
+                rejection_streak = 0 if accepted else rejection_streak + 1
                 if rejection_streak == self.reeval:
-                    self.x.log_prob = self.target(self.x.point)
+                    self._reeval_log_prob()
                     rejection_streak = 0
 
-            log_probs[ii] = self.x.log_prob
-            
-        return samples, log_probs
+            if callback is not None:
+                callback(ii, self._x, accepted)
+
+            if ii >= burn_in and ((ii - burn_in) % thin == 0) and keep_idx < kept:
+                samples[keep_idx] = self._x.point.detach()
+                log_probs[keep_idx] = self._x.log_prob.detach()
+                keep_idx += 1
+
+        return samples[:keep_idx], log_probs[:keep_idx]
+
+    def state_dict(self) -> dict:
+        """Serializable snapshot of sampler state for resuming a chain."""
+        return {
+            "x": {
+                "point": self._x.point.detach().clone(),
+                "log_prob": (
+                    self._x.log_prob.detach().clone()
+                    if self._x.log_prob is not None
+                    else None
+                ),
+                "grad": (
+                    self._x.grad.detach().clone()
+                    if self._x.grad is not None
+                    else None
+                ),
+            },
+            "acceptance_ratio": float(self.acceptance_ratio),
+            "step": int(self._step),
+            "generator": self.generator.get_state(),
+            "noisy": self.noisy,
+            "reeval": self.reeval,
+            "proposals": [p.state_dict() for p in self.proposals],
+        }
+
+    def load_state_dict(self, state: dict) -> None:
+        """Restore sampler state captured by :meth:`state_dict`.
+
+        Preserves the concrete type of ``self._x`` (e.g. ``HamiltonianSample``)
+        so that subsequent proposals can populate algorithm-specific fields.
+        """
+        x_state = state["x"]
+        new_sample = self._x.__class__(
+            point=x_state["point"].clone(),
+            log_prob=(
+                x_state["log_prob"].clone() if x_state["log_prob"] is not None else None
+            ),
+            grad=x_state["grad"].clone() if x_state["grad"] is not None else None,
+        )
+        self._x = new_sample
+        self.acceptance_ratio = float(state["acceptance_ratio"])
+        self._step = int(state["step"])
+        self.generator.set_state(state["generator"])
+        self.noisy = bool(state["noisy"])
+        self.reeval = int(state["reeval"])
+        for proposal, p_state in zip(self.proposals, state["proposals"]):
+            proposal.load_state_dict(p_state)
