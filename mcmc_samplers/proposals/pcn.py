@@ -19,7 +19,7 @@ from .proposal import Proposal
 
 
 class PreconditionedCrankNicolson(Proposal):
-    """Dimension-robust symmetric proposal for Gaussian-prior targets.
+    """Dimension-robust, prior-reversible proposal for Gaussian-prior targets.
 
     The proposal is
 
@@ -31,8 +31,9 @@ class PreconditionedCrankNicolson(Proposal):
     likelihood (not the prior) as the un-normalized log-density, the algorithm
     targets the posterior.
 
-    The user must supply the likelihood (or log-density minus log-prior) as the
-    sampler's ``target``; the prior is encoded in ``prior_sqrt_cov``.
+    The proposal is not symmetric, so in a generic MH sampler the target must
+    be the full posterior. For the likelihood-only acceptance rule use
+    :class:`~mcmc_samplers.PreconditionedCrankNicolsonSampler`.
 
     Parameters
     ----------
@@ -79,7 +80,7 @@ class PreconditionedCrankNicolson(Proposal):
 
     @property
     def is_symmetric(self) -> bool:
-        return True
+        return False
 
     @property
     def device(self) -> torch.device:

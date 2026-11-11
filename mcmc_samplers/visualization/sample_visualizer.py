@@ -4,9 +4,12 @@ from __future__ import annotations
 
 from typing import Tuple
 
-import matplotlib.pyplot as plt
-import numpy as np
 import torch
+
+try:  # matplotlib is an optional dependency: pip install mcmc-samplers[viz]
+    import matplotlib.pyplot as plt
+except ImportError:
+    plt = None
 
 from ..diagnostics import autocorrelation, effective_sample_size, gelman_rubin
 
@@ -22,6 +25,10 @@ class SampleVisualizer:
     """
 
     def __init__(self, samples: torch.Tensor):
+        if plt is None:
+            raise ImportError(
+                "SampleVisualizer requires matplotlib: pip install mcmc-samplers[viz]"
+            )
         samples = samples.detach()
         if samples.ndim == 1:
             samples = samples.unsqueeze(-1)

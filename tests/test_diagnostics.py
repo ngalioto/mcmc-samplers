@@ -27,6 +27,7 @@ def test_autocorrelation_ar1_decays_geometrically():
     for t in range(1, N):
         x[t] = rho * x[t - 1] + eps[t]
     acf = diagnostics.autocorrelation(x, max_lag=10)
+    assert acf.shape == (11,)
     expected = torch.tensor([rho ** k for k in range(11)])
     assert torch.allclose(acf, expected, atol=0.1)
 
@@ -54,10 +55,13 @@ def test_ess_drops_for_high_autocorrelation():
 
 def test_gelman_rubin_one_for_identical_chains():
     torch.manual_seed(0)
-    chain = torch.randn(500, 2)
+    N = 500
+    chain = torch.randn(N, 2)
     chains = chain.unsqueeze(0).repeat(3, 1, 1)
     rhat = diagnostics.gelman_rubin(chains)
-    assert torch.allclose(rhat, torch.ones(2), atol=1e-6)
+    # Identical chains give B = 0, so R-hat = sqrt((N - 1) / N), just below 1.
+    expected = torch.full((2,), ((N - 1) / N) ** 0.5)
+    assert torch.allclose(rhat, expected, atol=1e-6)
 
 
 def test_gelman_rubin_high_for_disjoint_chains():

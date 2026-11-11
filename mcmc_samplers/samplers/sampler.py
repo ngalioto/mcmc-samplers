@@ -16,6 +16,16 @@ from ..samples.sample import Sample
 AcceptanceKernel = Callable[[Sequence[Sample]], torch.Tensor]
 
 
+def _default_generator(device: torch.device) -> torch.Generator:
+    """Fresh generator seeded from torch's global RNG.
+
+    A bare ``torch.Generator()`` always starts from the same fixed seed, so
+    unseeded chains would be identical and ignore ``torch.manual_seed``.
+    """
+    seed = int(torch.randint(0, 2**63 - 1, (1,)).item())
+    return torch.Generator(device=device).manual_seed(seed)
+
+
 class Sampler(ABC):
     """Abstract base class for MCMC samplers.
 
@@ -36,8 +46,8 @@ class Sampler(ABC):
         One per proposal stage. Each receives the current ``[x, y_1, ...]`` and
         returns a 0-D log-acceptance ratio (i.e. ``log(min(1, ratio))``).
     generator : torch.Generator, optional
-        Per-sampler RNG used for ``randn``/``rand`` calls. A fresh ``Generator``
-        is created when ``None``; seed it explicitly for reproducible runs.
+        Per-sampler RNG. When ``None``, one is seeded from torch's global RNG
+        (so ``torch.manual_seed`` makes runs reproducible).
     noisy : bool
         If true, periodically re-evaluate ``target`` at the current point to
         absorb stochastic-likelihood noise (see Sherlock et al. 2017). Useful
@@ -64,7 +74,10 @@ class Sampler(ABC):
         self.target = target
         self.proposals = tuple(proposals)
         self.acceptance_kernels = tuple(acceptance_kernels)
-        self.generator = generator if generator is not None else torch.Generator()
+        if generator is None:
+            x0_point = x0.point if isinstance(x0, Sample) else x0
+            generator = _default_generator(x0_point.device)
+        self.generator = generator
         self.noisy = bool(noisy)
         self.reeval = int(reeval)
 
@@ -96,8 +109,12 @@ class Sampler(ABC):
             )
 
     def _eval_target(self, point: torch.Tensor) -> torch.Tensor:
-        """Evaluate the user's target at ``point`` and coerce to a 0-D tensor."""
-        lp = self.target(point).detach()
+        """Evaluate the target at ``point`` (no autograd graph) as a 0-D tensor.
+
+        Gradient-based samplers get gradients via ``log_prob_and_grad``.
+        """
+        with torch.no_grad():
+            lp = self.target(point).detach()
         return lp.squeeze() if lp.ndim > 0 else lp
 
     @property

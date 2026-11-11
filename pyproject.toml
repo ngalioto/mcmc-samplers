@@ -10,13 +10,12 @@ authors = [
 ]
 description = "A Python package for MCMC sampling."
 readme = "README.md"
+requires-python = ">=3.9"
 dependencies = [
-    "torch",
-    "tqdm",
-    "numpy",
-    "matplotlib"
+    "torch>=2.0",
+    "tqdm>=4.65",
 ]
-license = {text = "GPLv3"}
+license = {text = "MIT"}
 
 keywords = [
 "Markov chain Monte Carlo",
@@ -32,7 +31,7 @@ keywords = [
 ]
 classifiers = [
 "Intended Audience :: Science/Research",
-"License :: OSI Approved :: GNU General Public License v3 (GPLv3)",
+"License :: OSI Approved :: MIT License",
 "Natural Language :: English",
 "Operating System :: OS Independent",
 "Programming Language :: Python :: 3",
@@ -40,9 +39,11 @@ classifiers = [
 ]
 
 [project.optional-dependencies]
+viz = ["matplotlib>=3.7"]
 dev = [
     "pytest>=7",
-    "pytest-cov"
+    "pytest-cov",
+    "matplotlib>=3.7",
 ]
 
 [project.urls]

@@ -282,9 +282,9 @@ def test_three_stage_mixed_symmetric_asymmetric_dr_matches_mira(correlated_gauss
 
 
 def test_dr_fwd_memoisation_resets_between_mcmc_steps(correlated_gaussian):
-    """Verify ``_sample()`` re-initialises the per-step forward cache so that
-    cross-step state never leaks (which is the safety property motivating the
-    explicit reset)."""
+    """Verify ``_sample()`` re-seeds the per-step forward cache to
+    ``log pi(x)`` of the *current* state at the start of every step, so
+    stage-2 state from a previous step never leaks into the next one."""
     dram = DelayedRejectionAdaptiveMetropolis(
         target=correlated_gaussian,
         x0=torch.tensor([0.1, -0.2]),
@@ -293,14 +293,20 @@ def test_dr_fwd_memoisation_resets_between_mcmc_steps(correlated_gaussian):
         gamma=0.01,
         generator=_gen(0),
     )
-    # First step.
-    dram(N=1, show_progress=False)
-    first_x_log_prob = dram._x.log_prob.clone()
 
-    # Second step: the per-step cache must be re-seeded to log pi(x) at the new
-    # state, not carry forward from the previous step's stage-2 (if it happened).
-    dram(N=1, show_progress=False)
-    assert torch.allclose(dram._fwd_log_denom, dram._x.log_prob)
-    # And it cannot be the previous step's value unless the chain didn't move.
-    if not torch.equal(dram._x.log_prob, first_x_log_prob):
-        assert not torch.equal(dram._fwd_log_denom, first_x_log_prob)
+    # Record the cache value seen by every stage-1 call, alongside the chain
+    # state's log-density at that moment.
+    seen = []
+    original = dram._stage_log_alpha
+
+    def spy(y, stage, prev_log_denom, prev_log_alpha):
+        if stage == 1 and y[0] is dram._x:
+            seen.append((prev_log_denom.clone(), dram._x.log_prob.clone()))
+        return original(y, stage, prev_log_denom, prev_log_alpha)
+
+    dram._stage_log_alpha = spy
+    dram(N=50, show_progress=False)
+
+    assert len(seen) == 50
+    for cache, current in seen:
+        assert torch.equal(cache, current)

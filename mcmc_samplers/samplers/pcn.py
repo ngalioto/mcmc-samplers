@@ -2,17 +2,17 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from typing import Union
 
 import torch
 
 from ..proposals.pcn import PreconditionedCrankNicolson
 from ..samples.sample import Sample
-from .delayed_rejection import DelayedRejection
+from .sampler import Sampler
 
 
-class PreconditionedCrankNicolsonSampler(DelayedRejection):
+class PreconditionedCrankNicolsonSampler(Sampler):
     """Convenience sampler pairing the pCN proposal with MH acceptance.
 
     Use this when the prior is exactly the Gaussian encoded by
@@ -53,8 +53,17 @@ class PreconditionedCrankNicolsonSampler(DelayedRejection):
                     prior_cov=prior_cov, prior_sqrt_cov=prior_sqrt_cov, beta=beta
                 )
             ],
-            num_stages=1,
+            acceptance_kernels=[self._log_alpha],
             generator=generator,
             noisy=noisy,
             reeval=reeval,
         )
+
+    def _log_alpha(self, y: Sequence[Sample]) -> torch.Tensor:
+        """Log-acceptance ``min(0, log L(y) - log L(x))``."""
+        if y[-1].log_prob is None:
+            y[-1].log_prob = self._eval_target(y[-1].point)
+        log_alpha = y[-1].log_prob - y[0].log_prob
+        if torch.isnan(log_alpha):
+            return torch.full_like(log_alpha, -float("inf"))
+        return torch.clamp(log_alpha, max=0.0)

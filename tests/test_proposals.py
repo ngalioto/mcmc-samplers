@@ -159,13 +159,18 @@ def test_langevin_log_prob_matches_drift_gaussian():
     assert torch.allclose(lp, expected, atol=1e-6)
 
 
-def test_pcn_is_symmetric_and_dim_robust():
-    cov = torch.eye(5)
+def test_pcn_is_prior_reversible():
+    """pCN is not symmetric, but prior(a) q(b|a) == prior(b) q(a|b)."""
+    cov = torch.tensor([[1.0, 0.3], [0.3, 2.0]])
+    prior = torch.distributions.MultivariateNormal(torch.zeros(2), cov)
     proposal = PreconditionedCrankNicolson(prior_cov=cov, beta=0.3)
-    assert proposal.is_symmetric
-    a = Sample(torch.zeros(5))
-    b = Sample(torch.ones(5) * 0.1)
-    assert torch.allclose(proposal.log_prob([a, b]), proposal.log_prob([b, a]))
+    assert not proposal.is_symmetric
+    a = Sample(torch.tensor([0.5, -1.0]))
+    b = Sample(torch.tensor([-0.2, 0.4]))
+    assert not torch.allclose(proposal.log_prob([a, b]), proposal.log_prob([b, a]))
+    fwd = prior.log_prob(a.point) + proposal.log_prob([a, b])
+    rev = prior.log_prob(b.point) + proposal.log_prob([b, a])
+    assert torch.allclose(fwd, rev, atol=1e-5)
 
 
 def test_pcn_invalid_beta():

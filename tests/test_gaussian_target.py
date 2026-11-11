@@ -23,6 +23,7 @@ from mcmc_samplers import (
     Proposal,
     Sample,
     Sampler,
+    diagnostics,
     run_chains,
 )
 from mcmc_samplers.proposals.gaussian_random_walk import GaussianRandomWalk
@@ -41,14 +42,23 @@ def _check_gaussian_chain(
     target_cov: torch.Tensor,
     mean_tol: float = 0.2,
     cov_tol: float = 0.4,
+    min_ess: float = 30.0,
 ) -> None:
+    """Check moments within 4 Monte Carlo standard errors (ESS-based), never
+    tighter than ``mean_tol`` / ``cov_tol``."""
+    ess = diagnostics.effective_sample_size(samples).min().clamp(max=samples.shape[0])
+    assert ess > min_ess, f"ESS {ess:.0f} too low; chain is not mixing"
+    var = target_cov.diagonal()
+    mean_se = (var / ess).sqrt()
+    cov_se = ((var[:, None] * var[None, :] + target_cov**2) / ess).sqrt()
+
     emp_mean = samples.mean(dim=0)
     centered = samples - emp_mean
     emp_cov = centered.T @ centered / (samples.shape[0] - 1)
-    assert torch.allclose(emp_mean, target_mean, atol=mean_tol), (
+    assert ((emp_mean - target_mean).abs() <= (4 * mean_se).clamp(min=mean_tol)).all(), (
         f"empirical mean {emp_mean} differs from target {target_mean}"
     )
-    assert torch.allclose(emp_cov, target_cov, atol=cov_tol), (
+    assert ((emp_cov - target_cov).abs() <= (4 * cov_se).clamp(min=cov_tol)).all(), (
         f"empirical cov {emp_cov} differs from target {target_cov}"
     )
 

@@ -16,6 +16,7 @@ A Python package for performing MCMC sampling with PyTorch. Version 0.1.0.
 The samplers are written with a "no wasted compute" discipline:
 
 - **Gradients are evaluated exactly once per accepted move.** MALA and HMC samples carry their log-density and gradient with them, so the acceptance kernel reuses the cached value instead of triggering a second forward / backward pass through the target.
+- **Log-density-only evaluations skip autograd.** Accept/reject evaluations of the target run under `torch.no_grad()`, so an expensive target (e.g. a Kalman-filter likelihood with learnable parameters) never builds a graph it does not need.
 - **`AdaptiveCovariance` uses a symmetric Welford update** (`M2 += ((n-1)/n) * outer(delta, delta)`) which avoids both the asymmetric round-off of the textbook two-pass form and the second outer product.
 - **`AdaptiveCovariance` caches the identity matrix by default** (`cache_identity=True`); pass `cache_identity=False` if you are running in very high dimensions and prefer to recreate it each step rather than pay `dim**2` floats of persistent storage.
 - **Cholesky factor recomputation can be amortised** via `adapt_interval` (default `1`, i.e. recompute every step). Larger values are useful when the `O(dim**3)` Cholesky becomes a bottleneck. The running mean and `M2` are still updated on every step regardless of `adapt_interval`.
@@ -24,7 +25,8 @@ The samplers are written with a "no wasted compute" discipline:
 ## Installation
 
 ```sh
-pip install mcmc-samplers
+pip install mcmc-samplers          # core
+pip install "mcmc-samplers[viz]"   # + matplotlib for SampleVisualizer
 ```
 
 For development:
@@ -143,5 +145,5 @@ The [examples](examples/) directory contains notebooks covering:
 
 Author: Nicholas Galioto  
 Email: [ngalioto@umich.edu](mailto:ngalioto@umich.edu)  
-License: GPL3  
+License: MIT  
 Copyright 2025, Nicholas Galioto

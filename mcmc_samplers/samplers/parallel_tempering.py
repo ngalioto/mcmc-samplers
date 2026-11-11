@@ -8,7 +8,7 @@ from typing import Union
 import torch
 
 from ..samples.sample import Sample
-from .sampler import Sampler
+from .sampler import Sampler, _default_generator
 
 
 class ParallelTempering(Sampler):
@@ -67,7 +67,10 @@ class ParallelTempering(Sampler):
         self.betas = betas
         self.swap_every = int(swap_every)
         self._cold_idx = betas.index(1.0)
-        self.generator = generator if generator is not None else torch.Generator()
+        if generator is None:
+            x0_point = x0.point if isinstance(x0, Sample) else x0
+            generator = _default_generator(x0_point.device)
+        self.generator = generator
 
         self.replicas: list[Sampler] = []
         for beta in self.betas:
@@ -108,6 +111,11 @@ class ParallelTempering(Sampler):
             "ParallelTempering does not allow direct assignment to x; "
             "set each replica's state via the replicas list."
         )
+
+    @property
+    def _x(self) -> Sample:
+        # Sampler.__call__ reads self._x; the chain state is the cold replica's.
+        return self.cold._x
 
     @property
     def dim(self) -> int:

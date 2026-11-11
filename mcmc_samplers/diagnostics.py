@@ -39,7 +39,8 @@ def autocorrelation(
     Returns
     -------
     torch.Tensor
-        Autocorrelation function of shape ``(max_lag + 1, dim)``.
+        Autocorrelation function of shape ``(max_lag + 1, dim)``, or
+        ``(max_lag + 1,)`` for univariate ``(N,)`` input.
     """
     samples = _as_chain_array(chain).to(torch.float64)
     N, dim = samples.shape
@@ -59,6 +60,8 @@ def autocorrelation(
     var = acf[0]
     var = torch.where(var > 0, var, torch.ones_like(var))
     acf = acf / var
+    if chain.ndim == 1:
+        acf = acf.squeeze(-1)
     return acf.to(chain.dtype)
 
 
