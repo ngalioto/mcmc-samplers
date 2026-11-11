@@ -1,8 +1,9 @@
 name: Tests
 
+# Manual only (Actions tab -> Tests -> Run workflow), so pushes don't
+# trigger runs or failure emails.
 on:
-  push:
-  pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: read
