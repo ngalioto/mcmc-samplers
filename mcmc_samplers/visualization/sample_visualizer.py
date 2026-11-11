@@ -74,9 +74,16 @@ class SampleVisualizer:
         labels: Tuple[str, ...] | None = None,
         titles: Tuple[str, ...] | None = None,
         partition: Tuple[Tuple[int, ...], ...] | None = None,
+        fig=None,
     ):
-        """Plot the trace of each chain (per dimension)."""
+        """Plot the trace of each chain (per dimension).
+
+        Pass ``fig`` (a Figure or SubFigure) to draw into it instead of a new
+        figure, e.g. to compare methods side by side with ``fig.subfigures``.
+        """
         labels, titles, partition = self._get_defaults(labels, titles, partition)
+        if fig is not None and len(partition) > 1:
+            raise ValueError("fig can only be used with a single partition")
 
         figs, axes_out = [], []
         if self._multi:
@@ -89,8 +96,9 @@ class SampleVisualizer:
 
         xx = range(0, N, step)
         for ii, idx in enumerate(partition):
-            fig, axs = plt.subplots(len(idx), sharex=True, squeeze=False)
-            axs = axs[:, 0]
+            if fig is None:
+                fig = plt.figure()
+            axs = fig.subplots(len(idx), sharex=True, squeeze=False)[:, 0]
             for jj, idx_jj in enumerate(idx):
                 for c in range(num_chains):
                     axs[jj].plot(
@@ -103,6 +111,7 @@ class SampleVisualizer:
             fig.suptitle(titles[ii])
             figs.append(fig)
             axes_out.append(axs)
+            fig = None
 
         return figs, axes_out
 
