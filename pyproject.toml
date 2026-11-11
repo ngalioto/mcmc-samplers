@@ -51,7 +51,8 @@ Homepage = "https://github.com/ngalioto/mcmc-samplers"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-ra"
+addopts = "-ra -m 'not slow'"
+markers = ["slow: long-running statistical checks (run with: pytest -m slow)"]
 filterwarnings = [
     "ignore::DeprecationWarning",
 ]
