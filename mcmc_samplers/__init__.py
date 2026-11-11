@@ -30,6 +30,7 @@ from .visualization.sample_visualizer import SampleVisualizer
 
 from . import diagnostics
 from .utils.multi_chain import run_chains
+from .utils.transforms import transformed_target
 
 __version__ = "0.1.0"
 
@@ -56,4 +57,5 @@ __all__ = (
     "ScaledCovariance",
     "diagnostics",
     "run_chains",
+    "transformed_target",
 )
