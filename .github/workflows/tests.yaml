@@ -33,7 +33,6 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: ngalioto/bside
-          ref: feat/broad-upgrade  # switch to main once bside.sysid is merged there
           path: bside
       - uses: actions/setup-python@v5
         with:
