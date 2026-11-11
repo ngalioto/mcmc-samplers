@@ -1,7 +1,11 @@
 """Convergence diagnostics for MCMC chains.
 
 Pure-PyTorch implementations (no numpy/scipy/arviz dependency) of
-autocorrelation, effective sample size, and Gelman-Rubin R-hat.
+autocorrelation, effective sample size, and R-hat.
+
+Reference: Vehtari, Gelman, Simpson, Carpenter, Buerkner (2021).
+"Rank-normalization, folding, and localization: an improved R-hat for
+assessing convergence of MCMC." Bayesian Analysis 16(2): 667-718.
 """
 
 from __future__ import annotations
@@ -65,54 +69,102 @@ def autocorrelation(
     return acf.to(chain.dtype)
 
 
+def _as_chains_array(chains: torch.Tensor) -> torch.Tensor:
+    """Coerce ``(N,)``, ``(N, dim)`` or ``(num_chains, N, dim)`` to 3-D."""
+    if chains.ndim == 3:
+        return chains
+    return _as_chain_array(chains).unsqueeze(0)
+
+
+def _ess(samples: torch.Tensor) -> torch.Tensor:
+    """Multi-chain ESS of a float64 ``(M, N, dim)`` array (Vehtari et al. 2021)."""
+    M, N, dim = samples.shape
+    chain_vars = samples.var(dim=1, unbiased=True)  # (M, dim)
+    W = chain_vars.mean(dim=0)
+    if M > 1:
+        B = N * samples.mean(dim=1).var(dim=0, unbiased=True)
+    else:
+        B = torch.zeros(dim, dtype=samples.dtype)
+    var_plus = (N - 1) / N * W + B / N
+
+    # Biased autocovariance of each chain, averaged over chains: (N, dim)
+    acov = torch.stack(
+        [
+            autocorrelation(samples[m], max_lag=N - 1) * chain_vars[m] * (N - 1) / N
+            for m in range(M)
+        ]
+    ).mean(dim=0)
+
+    ess = torch.zeros(dim, dtype=samples.dtype)
+    for d in range(dim):
+        if var_plus[d] <= 0:
+            ess[d] = float(M * N)
+            continue
+        rho = 1.0 - (W[d] - acov[:, d]) / var_plus[d]
+        rho[0] = 1.0
+        # Geyer's initial monotone sequence over pairs of lags.
+        rho_pair = rho[: 2 * (N // 2)].reshape(-1, 2).sum(dim=1)
+        positive = torch.cumprod((rho_pair > 0).to(torch.int64), dim=0).bool()
+        rho_pair = rho_pair[positive]
+        for k in range(1, rho_pair.shape[0]):
+            rho_pair[k] = min(rho_pair[k], rho_pair[k - 1])
+        tau = max(-1.0 + 2.0 * rho_pair.sum().item(), 1.0)
+        ess[d] = M * N / tau
+    return ess
+
+
 def effective_sample_size(chain: torch.Tensor) -> torch.Tensor:
     """Effective sample size using Geyer's initial monotone sequence estimator.
 
     Parameters
     ----------
     chain : torch.Tensor
-        Univariate ``(N,)`` or multivariate ``(N, dim)`` chain.
+        A single chain, ``(N,)`` or ``(N, dim)``, or several chains,
+        ``(num_chains, N, dim)``. For several chains the combined multi-chain
+        ESS of Vehtari et al. (2021) is returned, which is lowered when the
+        chains disagree with each other.
 
     Returns
     -------
     torch.Tensor
         ESS per dimension, shape ``(dim,)`` (or scalar for univariate input).
-
-    Notes
-    -----
-    Uses Geyer's (1992) initial monotone sequence estimator: sums sequential
-    pairs of even/odd lag autocorrelations as long as they are positive and
-    monotonically non-increasing. This is the standard estimator in
-    PyMC/Stan/arviz for single-chain ESS.
     """
-    samples = _as_chain_array(chain).to(torch.float64)
-    N, dim = samples.shape
-    acf = autocorrelation(samples, max_lag=N - 1)
-
-    ess = torch.zeros(dim, dtype=torch.float64)
-    for d in range(dim):
-        rho = acf[:, d].clone()
-        rho_pair = rho[: 2 * (rho.shape[0] // 2)].reshape(-1, 2).sum(dim=1)
-        positive_mask = torch.cumprod((rho_pair > 0).to(torch.int64), dim=0).bool()
-        if not positive_mask.any():
-            ess[d] = float(N)
-            continue
-        rho_pair = rho_pair[positive_mask]
-        for k in range(1, rho_pair.shape[0]):
-            if rho_pair[k] > rho_pair[k - 1]:
-                rho_pair[k] = rho_pair[k - 1]
-        tau = -1.0 + 2.0 * rho_pair.sum().item()
-        if tau < 1.0:
-            tau = 1.0
-        ess[d] = N / tau
-
+    ess = _ess(_as_chains_array(chain).to(torch.float64))
     if chain.ndim == 1:
         return ess.squeeze().to(chain.dtype)
     return ess.to(chain.dtype)
 
 
+def _check_chains(chains: torch.Tensor) -> torch.Tensor:
+    """Coerce ``(num_chains, N)`` or ``(num_chains, N, dim)`` to float64 3-D."""
+    if chains.ndim == 2:
+        chains = chains.unsqueeze(-1)
+    if chains.ndim != 3:
+        raise ValueError(
+            f"chains must have shape (num_chains, N) or (num_chains, N, dim), "
+            f"got {tuple(chains.shape)}"
+        )
+    return chains.to(torch.float64)
+
+
+def _basic_rhat(samples: torch.Tensor) -> torch.Tensor:
+    """Classic R-hat of a float64 ``(M, N, dim)`` array."""
+    M, N, _ = samples.shape
+    W = samples.var(dim=1, unbiased=True).mean(dim=0)
+    B = N * samples.mean(dim=1).var(dim=0, unbiased=True)
+    var_hat = (N - 1) / N * W + B / N
+    safe_W = torch.where(W > 0, W, torch.ones_like(W))
+    return torch.sqrt(var_hat / safe_W)
+
+
+def _squeeze_univariate(out: torch.Tensor, chains: torch.Tensor) -> torch.Tensor:
+    if chains.ndim == 2:
+        return out.squeeze().to(chains.dtype)
+    return out.to(chains.dtype)
+
+
 def gelman_rubin(chains: torch.Tensor) -> torch.Tensor:
-    """Gelman-Rubin (1992) potential scale reduction factor (R-hat).
+    """Classic Gelman-Rubin (1992) potential scale reduction factor (R-hat).
 
     Parameters
     ----------
@@ -127,37 +179,68 @@ def gelman_rubin(chains: torch.Tensor) -> torch.Tensor:
 
     Notes
     -----
-    Returns the un-corrected (non rank-normalized) R-hat. Values close to 1.0
-    indicate convergence; values above 1.1 are commonly flagged as cause for
-    concern.
+    Prefer :func:`rhat`, the rank-normalized split R-hat, which also detects
+    drift within a chain and chains that differ in scale or tails.
     """
-    if chains.ndim == 2:
-        chains = chains.unsqueeze(-1)
-    if chains.ndim != 3:
-        raise ValueError(
-            f"chains must have shape (num_chains, N) or (num_chains, N, dim), "
-            f"got {tuple(chains.shape)}"
-        )
-
-    samples = chains.to(torch.float64)
-    M, N, dim = samples.shape
-    if M < 2:
+    samples = _check_chains(chains)
+    if samples.shape[0] < 2:
         raise ValueError("Gelman-Rubin requires at least 2 chains.")
+    return _squeeze_univariate(_basic_rhat(samples), chains)
 
-    chain_means = samples.mean(dim=1)
-    chain_vars = samples.var(dim=1, unbiased=True)
 
-    grand_mean = chain_means.mean(dim=0)
-    B = N / (M - 1) * ((chain_means - grand_mean) ** 2).sum(dim=0)
-    W = chain_vars.mean(dim=0)
+def _average_ranks(x: torch.Tensor) -> torch.Tensor:
+    """1-based ranks of each column of ``x``, averaging over ties.
 
-    safe_W = torch.where(W > 0, W, torch.ones_like(W))
-    var_hat = (N - 1) / N * W + B / N
-    rhat = torch.sqrt(var_hat / safe_W)
+    Ties are common in MCMC output, since a rejected step repeats a draw.
+    """
+    ranks = torch.empty_like(x)
+    for d in range(x.shape[1]):
+        values, order = torch.sort(x[:, d])
+        _, counts = torch.unique_consecutive(values, return_counts=True)
+        ends = torch.cumsum(counts, dim=0).to(x.dtype)
+        avg = ends - (counts.to(x.dtype) - 1) / 2
+        ranks[order, d] = torch.repeat_interleave(avg, counts)
+    return ranks
 
-    if chains.shape[-1] == 1:
-        return rhat.squeeze().to(chains.dtype)
-    return rhat.to(chains.dtype)
+
+def _rank_normalize(samples: torch.Tensor) -> torch.Tensor:
+    """Replace draws by the normal scores of their ranks across all chains."""
+    M, N, dim = samples.shape
+    S = M * N
+    ranks = _average_ranks(samples.reshape(S, dim))
+    return torch.special.ndtri((ranks - 0.375) / (S + 0.25)).reshape(M, N, dim)
+
+
+def rhat(chains: torch.Tensor) -> torch.Tensor:
+    """Rank-normalized split R-hat (Vehtari et al. 2021).
+
+    Each chain is split in half (to detect drift within a chain), draws are
+    replaced by normal scores of their ranks (robust to heavy tails), and the
+    larger of the bulk R-hat and the tail R-hat (computed on ``|x - median|``)
+    is returned. Values above about 1.01 suggest the chains have not mixed.
+
+    Parameters
+    ----------
+    chains : torch.Tensor
+        Tensor of shape ``(num_chains, N, dim)`` or ``(num_chains, N)``.
+        A single chain is allowed, since it is split in two.
+
+    Returns
+    -------
+    torch.Tensor
+        R-hat per dimension, shape ``(dim,)`` or scalar for univariate input.
+    """
+    samples = _check_chains(chains)
+    M, N, dim = samples.shape
+    half = N // 2
+    if half < 2:
+        raise ValueError("rhat needs at least 4 draws per chain.")
+    split = torch.cat([samples[:, :half], samples[:, N - half :]], dim=0)
+
+    bulk = _basic_rhat(_rank_normalize(split))
+    median = split.reshape(-1, dim).median(dim=0).values
+    tail = _basic_rhat(_rank_normalize((split - median).abs()))
+    return _squeeze_univariate(torch.maximum(bulk, tail), chains)
 
 
 def summarize(
@@ -172,8 +255,9 @@ def summarize(
     Returns
     -------
     dict
-        Keys: ``mean``, ``std``, ``ess`` (per chain, averaged), and ``rhat``
-        (only when multi-chain). All values are 1-D tensors of length ``dim``.
+        Keys: ``mean``, ``std``, ``ess`` and, for multi-chain input,
+        ``rhat`` (rank-normalized split R-hat). All values are 1-D tensors of
+        length ``dim``.
     """
     if (chain is None) == (chains is None):
         raise ValueError("Provide exactly one of `chain` or `chains`.")
@@ -189,13 +273,9 @@ def summarize(
     if multi.ndim == 2:
         multi = multi.unsqueeze(-1)
     flat = multi.reshape(-1, multi.shape[-1])
-    ess_per_chain = torch.stack(
-        [effective_sample_size(multi[i]) for i in range(multi.shape[0])],
-        dim=0,
-    )
     return {
         "mean": flat.mean(dim=0).to(chains.dtype),
         "std": flat.std(dim=0, unbiased=True).to(chains.dtype),
-        "ess": ess_per_chain.sum(dim=0).to(chains.dtype),
-        "rhat": gelman_rubin(multi),
+        "ess": effective_sample_size(multi).to(chains.dtype),
+        "rhat": rhat(multi).to(chains.dtype),
     }

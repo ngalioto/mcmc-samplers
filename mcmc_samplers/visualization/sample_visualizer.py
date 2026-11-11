@@ -11,7 +11,8 @@ try:  # matplotlib is an optional dependency: pip install mcmc-samplers[viz]
 except ImportError:
     plt = None
 
-from ..diagnostics import autocorrelation, effective_sample_size, gelman_rubin
+from .. import diagnostics
+from ..diagnostics import autocorrelation, effective_sample_size
 
 
 class SampleVisualizer:
@@ -233,18 +234,8 @@ class SampleVisualizer:
         mean = flat.mean(dim=0)
         std = flat.std(dim=0, unbiased=True)
 
-        if self._multi:
-            ess_per_chain = torch.stack(
-                [
-                    effective_sample_size(self.samples[c])
-                    for c in range(self.samples.shape[0])
-                ]
-            )
-            ess = ess_per_chain.sum(dim=0)
-            rhat = gelman_rubin(self.samples)
-        else:
-            ess = effective_sample_size(self.samples)
-            rhat = None
+        ess = effective_sample_size(self.samples)
+        rhat = diagnostics.rhat(self.samples) if self._multi else None
 
         rows = [f"{'param':<12} {'mean':>10} {'sd':>10} {'ess':>10}"]
         if rhat is not None:

@@ -75,3 +75,37 @@ def test_gelman_rubin_high_for_disjoint_chains():
     )
     rhat = diagnostics.gelman_rubin(chains)
     assert (rhat > 1.5).all()
+
+
+def test_multichain_ess_matches_ar1_theory():
+    torch.manual_seed(0)
+    M, N, rho = 4, 4000, 0.8
+    eps = torch.randn(M, N, 1)
+    x = torch.zeros(M, N, 1)
+    for t in range(1, N):
+        x[:, t] = rho * x[:, t - 1] + eps[:, t]
+    expected = M * N * (1 - rho) / (1 + rho)
+    ess = float(diagnostics.effective_sample_size(x))
+    assert 0.8 * expected < ess < 1.2 * expected
+
+
+def test_rhat_near_one_for_iid_chains():
+    torch.manual_seed(0)
+    assert abs(float(diagnostics.rhat(torch.randn(4, 1000))) - 1.0) < 0.01
+
+
+def test_rhat_flags_what_classic_rhat_misses():
+    torch.manual_seed(0)
+    scale = torch.randn(4, 1000)
+    scale[0] *= 3  # same mean, different spread
+    drift = torch.randn(4, 1000) + torch.linspace(0, 2, 1000)  # drift within chains
+    for chains in (scale, drift):
+        assert float(diagnostics.gelman_rubin(chains)) < 1.01
+        assert float(diagnostics.rhat(chains)) > 1.05
+
+
+def test_rhat_handles_repeated_draws():
+    torch.manual_seed(0)
+    x = torch.randn(4, 1000)
+    x[:, 1::2] = x[:, 0::2]  # every draw repeated, like MH rejections
+    assert abs(float(diagnostics.rhat(x)) - 1.0) < 0.02
