@@ -114,11 +114,12 @@ class GaussianRandomWalk(Proposal):
     ) -> Union[Sample, list]:
         """Draw ``N`` samples from a Gaussian centered at ``y[0].point``.
 
-        Returns a single :class:`Sample` if ``N == 1`` and a list otherwise.
+        ``y[0].point`` may be ``(dim,)`` or ``(num_chains, dim)``. Returns a
+        single :class:`Sample` if ``N == 1`` and a list otherwise.
         """
         center = y[0].point
         eps = torch.randn(
-            N, self.dim, generator=generator, device=self.device, dtype=self.dtype
+            N, *center.shape, generator=generator, device=self.device, dtype=self.dtype
         )
         sample_points = eps @ self.sqrt_cov.T + center
         if N == 1:
@@ -126,10 +127,11 @@ class GaussianRandomWalk(Proposal):
         return [Sample(sample_points[ii]) for ii in range(N)]
 
     def log_prob(self, y: Sequence[Sample]) -> torch.Tensor:
-        """Un-normalized log-density of moving from ``y[0]`` to ``y[-1]``."""
+        """Un-normalized log-density of moving from ``y[0]`` to ``y[-1]``
+        (one value per chain when batched)."""
         delta = (y[-1].point - y[0].point).unsqueeze(-1)
         z = torch.linalg.solve_triangular(self.sqrt_cov, delta, upper=False)
-        return -0.5 * z.pow(2).sum()
+        return -0.5 * z.pow(2).sum(dim=(-2, -1))
 
     def state_dict(self) -> dict:
         return {"sqrt_cov": self.sqrt_cov.detach().clone()}
@@ -259,20 +261,30 @@ class AdaptiveCovariance(GaussianRandomWalk):
     def _adapt(self, x: torch.Tensor) -> None:
         """Update running mean and second-moment with the new sample ``x``.
 
-        Refreshes ``sqrt_cov`` once per ``adapt_interval`` post-``n0`` calls.
+        ``x`` may be one sample ``(dim,)`` or one per chain ``(num_chains, dim)``;
+        all chains then share (and speed up) the adaptation. Refreshes
+        ``sqrt_cov`` each time another ``adapt_interval`` samples past ``n0``
+        have been seen.
         """
-        x = x.detach()
-        self._iteration += 1
-        n = self._iteration
-        delta = x - self._mean
-        self._mean = self._mean + delta / n
-        # Symmetric Welford update: outer(delta, delta - delta/n) =
-        # ((n-1)/n) * outer(delta, delta). One rank-one outer, exactly symmetric.
-        if n > 1:
-            scale = (n - 1) / n
-            self._M2 = self._M2 + scale * torch.outer(delta, delta)
+        x = x.detach().reshape(-1, self.dim)
+        m = x.shape[0]
+        n_old = self._iteration
+        n = n_old + m
+        self._iteration = n
+        # Merge the batch's statistics into the running ones (Chan et al. 1979).
+        # For one sample this is the symmetric Welford update
+        # M2 += ((n-1)/n) * outer(delta, delta): exactly symmetric, one outer.
+        batch_mean = x.mean(dim=0)
+        delta = batch_mean - self._mean
+        self._mean = self._mean + delta * m / n
+        if m > 1:
+            centered = x - batch_mean
+            self._M2 = self._M2 + centered.T @ centered
+        if n_old > 0:
+            self._M2 = self._M2 + (n_old * m / n) * torch.outer(delta, delta)
 
-        if n > self.n0 and ((n - self.n0) % self.adapt_interval == 0):
+        k = self.adapt_interval
+        if n > self.n0 and (n - self.n0) // k > (max(n_old, self.n0) - self.n0) // k:
             try:
                 self.sqrt_cov = _cholesky_with_jitter(self.cov, eps=self.eps)
             except torch.linalg.LinAlgError:
@@ -361,26 +373,6 @@ class ScaledCovariance(GaussianRandomWalk):
     @property
     def dtype(self) -> torch.dtype:
         return self.covariance.dtype
-
-    def propose(
-        self,
-        y: Sequence[Sample],
-        N: int = 1,
-        generator: torch.Generator | None = None,
-    ) -> Union[Sample, list]:
-        center = y[0].point
-        eps = torch.randn(
-            N, self.dim, generator=generator, device=self.device, dtype=self.dtype
-        )
-        sample_points = eps @ self.sqrt_cov.T + center
-        if N == 1:
-            return Sample(sample_points.squeeze(0))
-        return [Sample(sample_points[ii]) for ii in range(N)]
-
-    def log_prob(self, y: Sequence[Sample]) -> torch.Tensor:
-        delta = (y[-1].point - y[0].point).unsqueeze(-1)
-        z = torch.linalg.solve_triangular(self.sqrt_cov, delta, upper=False)
-        return -0.5 * z.pow(2).sum()
 
     def state_dict(self) -> dict:
         return {"gamma": self.gamma}

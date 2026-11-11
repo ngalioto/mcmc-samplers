@@ -9,13 +9,16 @@ narrow). These catch errors that mean/covariance checks on a known target miss.
 
 Model: theta ~ N(0, 1), y_i ~ N(theta, 1) for i = 1..5.
 
-These take a few minutes, so they are marked slow: run with ``pytest -m slow``.
+The one-chain-at-a-time checks take a few minutes, so they are marked slow
+(run with ``pytest -m slow``). The batched checks run every dataset as its own
+chain in one batched sampler and take about a second.
 """
 
 import pytest
 import torch
 
 from mcmc_samplers import (
+    AdaptiveMetropolis,
     DelayedRejectionAdaptiveMetropolis,
     MetropolisAdjustedLangevin,
     MetropolisHastings,
@@ -67,7 +70,11 @@ def sbc_z_scores(make_sampler):
         )
         ranks.append(int((draws[:, 0] < theta).sum()))
 
-    u = (torch.tensor(ranks, dtype=torch.float64) + 0.5) / (NUM_DRAWS + 1)
+    return _z_scores(torch.tensor(ranks))
+
+
+def _z_scores(ranks):
+    u = (ranks.to(torch.float64) + 0.5) / (NUM_DRAWS + 1)
     z_mean = (u.mean() - 0.5) / (1 / 12 / NUM_REPS) ** 0.5
     z_var = (u.var() - 1 / 12) / ((1 / 80 - 1 / 144) / NUM_REPS) ** 0.5
     return float(z_mean), float(z_var)
@@ -77,5 +84,33 @@ def sbc_z_scores(make_sampler):
 @pytest.mark.parametrize("name", ["MH", "DRAM", "MALA", "pCN"])
 def test_sbc_ranks_are_uniform(name):
     z_mean, z_var = sbc_z_scores(lambda y, gen: _make_sampler(name, y, gen))
+    assert abs(z_mean) < Z_MAX, f"{name} looks biased (z = {z_mean:.2f})"
+    assert abs(z_var) < Z_MAX, f"{name} looks too wide/narrow (z = {z_var:.2f})"
+
+
+BATCHED = {
+    "MH": MetropolisHastings,
+    "AM": AdaptiveMetropolis,
+    "DRAM": DelayedRejectionAdaptiveMetropolis,
+}
+
+
+@pytest.mark.parametrize("name", BATCHED)
+def test_sbc_batched(name):
+    """Same check, with dataset i run as chain i of one batched sampler."""
+    gen = torch.Generator().manual_seed(1)
+    theta = torch.randn(NUM_REPS, 1, generator=gen)
+    y = theta + torch.randn(NUM_REPS, 5, generator=gen)
+
+    def log_post(t):  # t: (NUM_REPS, 1), one dataset per chain
+        return -0.5 * ((y - t) ** 2).sum(-1) - 0.5 * (t**2).sum(-1)
+
+    sampler = BATCHED[name](
+        log_post, torch.zeros(NUM_REPS, 1), cov=0.5 * torch.eye(1),
+        generator=torch.Generator().manual_seed(2), batched=True,
+    )
+    draws, _ = sampler(BURN_IN + NUM_DRAWS * THIN, burn_in=BURN_IN, thin=THIN, show_progress=False)
+    ranks = (draws[..., 0] < theta).sum(dim=1)
+    z_mean, z_var = _z_scores(ranks)
     assert abs(z_mean) < Z_MAX, f"{name} looks biased (z = {z_mean:.2f})"
     assert abs(z_var) < Z_MAX, f"{name} looks too wide/narrow (z = {z_var:.2f})"

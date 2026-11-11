@@ -82,6 +82,7 @@ class ParallelTempering(Sampler):
         self.acceptance_kernels: tuple = ()
         self.noisy = False
         self.reeval = 0
+        self.batched = False
         self.acceptance_ratio = 0.0
         self._step = 0
         self.swap_acceptance_ratios = [0.0] * (len(self.betas) - 1)

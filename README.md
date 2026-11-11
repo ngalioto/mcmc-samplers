@@ -10,7 +10,8 @@ A Python package for performing MCMC sampling with PyTorch. Version 0.1.0.
 - **Diagnostics**: autocorrelation, single- and multi-chain effective sample size, and rank-normalized split R-hat (Vehtari et al. 2021).
 - **Constrained parameters**: `transformed_target` samples positive, bounded or simplex-valued parameters in an unconstrained space.
 - **Noisy likelihoods**: with a stochastic likelihood (e.g. synthetic or particle-filter likelihoods) the default is exact pseudo-marginal MCMC; `noisy=True` adds the re-evaluation heuristic of Maraia et al. (2023), which mixes better but is approximate.
-- **Multi-chain runner** and an extended `SampleVisualizer` (chain traces, ACF, triangular histograms, summary tables).
+- **Many chains at once**: MH, AM and DRAM take `batched=True` to advance many chains in one vectorized step; any sampler can also run chains one after another with `run_chains`.
+- An extended `SampleVisualizer` (chain traces, ACF, triangular histograms, summary tables).
 - **Resumable samplers**: every sampler supports `state_dict()` / `load_state_dict()` to checkpoint and resume long-running chains.
 
 ## Performance notes
@@ -144,6 +145,30 @@ NUTS gives the most effective samples per draw, but each draw costs many
 gradient evaluations; it pays off as the dimension grows. When the target is
 expensive (a filter likelihood, an ODE solve), compare samplers per evaluation.
 
+## Many chains at once
+
+MH, AM and DRAM can advance many independent chains in one vectorized step.
+Pass `x0` of shape `(num_chains, dim)` and `batched=True`; the target must map
+`(num_chains, dim)` to `(num_chains,)` (wrap a per-point target with
+`torch.func.vmap`). Each chain accepts or rejects on its own; AM and DRAM pool
+all chains into one adapted covariance, so adaptation is faster too.
+
+```python
+sampler = DelayedRejectionAdaptiveMetropolis(
+    target=target,                  # (num_chains, dim) -> (num_chains,)
+    x0=torch.randn(64, dim),
+    cov=torch.eye(dim),
+    batched=True,
+)
+chains, log_probs = sampler(4_000, burn_in=1_000)  # (64, 3000, dim), (64, 3000)
+print('R-hat:', diagnostics.rhat(chains))
+```
+
+On a 10-d Gaussian, the cost per chain-step drops roughly 50x (MH) and 10x
+(DRAM) at 64 chains, and several hundred times at 512 chains, because the
+fixed per-step overhead is shared. With only a few chains the overhead
+dominates and batching gains little.
+
 ## Resuming a chain
 
 ```python
@@ -169,7 +194,6 @@ The [examples](examples/) directory contains notebooks covering:
 - [Parallel tempering on a bimodal target](examples/parallel_tempering.ipynb)
 - [pCN in high dimensions](examples/pcn.ipynb)
 - [Multi-chain convergence diagnostics](examples/diagnostics.ipynb)
-- [System identification with bside: DRAM vs NUTS](examples/bside_system_id.ipynb)
 
 ## Citation / references
 

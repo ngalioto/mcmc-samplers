@@ -94,6 +94,7 @@ class DelayedRejection(Sampler, ABC):
         generator: torch.Generator | None = None,
         noisy: bool = False,
         reeval: int = 200,
+        batched: bool = False,
     ):
         if num_stages is None:
             num_stages = len(proposals)
@@ -115,6 +116,7 @@ class DelayedRejection(Sampler, ABC):
             generator=generator,
             noisy=noisy,
             reeval=reeval,
+            batched=batched,
         )
 
         # Per-step memoization of the forward (outer) log-denominator and
@@ -210,14 +212,8 @@ class DelayedRejection(Sampler, ABC):
             log_numer = log_numer + self.proposals[stage - 1].log_prob(y[::-1])
 
         log_alpha = log_numer - log_denom
-        if torch.isnan(log_alpha):
-            log_alpha = torch.tensor(
-                -float("inf"), device=log_alpha.device, dtype=log_alpha.dtype
-            )
-        log_alpha = torch.minimum(
-            torch.zeros((), device=log_alpha.device, dtype=log_alpha.dtype),
-            log_alpha,
-        )
+        log_alpha = torch.where(torch.isnan(log_alpha), -float("inf"), log_alpha)
+        log_alpha = log_alpha.clamp(max=0.0)
         return log_alpha, log_denom
 
 
@@ -246,6 +242,7 @@ class MetropolisHastings(DelayedRejection):
         generator: torch.Generator | None = None,
         noisy: bool = False,
         reeval: int = 200,
+        batched: bool = False,
     ):
         super().__init__(
             target=target,
@@ -255,6 +252,7 @@ class MetropolisHastings(DelayedRejection):
             generator=generator,
             noisy=noisy,
             reeval=reeval,
+            batched=batched,
         )
 
 
@@ -286,6 +284,7 @@ class AdaptiveMetropolis(DelayedRejection):
         generator: torch.Generator | None = None,
         noisy: bool = False,
         reeval: int = 200,
+        batched: bool = False,
     ):
         super().__init__(
             target=target,
@@ -304,6 +303,7 @@ class AdaptiveMetropolis(DelayedRejection):
             generator=generator,
             noisy=noisy,
             reeval=reeval,
+            batched=batched,
         )
 
     def _sample(self) -> int:
@@ -339,6 +339,7 @@ class DelayedRejectionAdaptiveMetropolis(DelayedRejection):
         generator: torch.Generator | None = None,
         noisy: bool = False,
         reeval: int = 200,
+        batched: bool = False,
     ):
         adaptive = AdaptiveCovariance(
             cov=cov,
@@ -357,6 +358,7 @@ class DelayedRejectionAdaptiveMetropolis(DelayedRejection):
             generator=generator,
             noisy=noisy,
             reeval=reeval,
+            batched=batched,
         )
 
     def _sample(self) -> int:

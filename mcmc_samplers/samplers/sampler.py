@@ -59,6 +59,12 @@ class Sampler(ABC):
         is an unbiased likelihood estimate.
     reeval : int
         Number of consecutive rejections before triggering a re-evaluation.
+    batched : bool
+        Run several independent chains at once. ``x0`` then has shape
+        ``(num_chains, dim)`` and ``target`` must map ``(num_chains, dim)`` to
+        ``(num_chains,)`` (``torch.func.vmap(target)`` turns a per-point target
+        into one). Each chain accepts or rejects on its own, and ``__call__``
+        returns samples of shape ``(num_chains, kept, dim)``.
     """
 
     def __init__(
@@ -70,6 +76,7 @@ class Sampler(ABC):
         generator: torch.Generator | None = None,
         noisy: bool = False,
         reeval: int = 200,
+        batched: bool = False,
     ):
         if len(proposals) != len(acceptance_kernels):
             raise ValueError(
@@ -85,6 +92,7 @@ class Sampler(ABC):
         self.generator = generator
         self.noisy = bool(noisy)
         self.reeval = int(reeval)
+        self.batched = bool(batched)
 
         self.acceptance_ratio = 0.0
         self._step = 0
@@ -94,18 +102,26 @@ class Sampler(ABC):
     def x(self) -> Sample:
         return self._x
 
+    def _as_point(self, point: torch.Tensor) -> torch.Tensor:
+        """Shape a state as ``(dim,)``, or ``(num_chains, dim)`` when batched."""
+        if self.batched:
+            if point.ndim != 2:
+                raise ValueError(
+                    f"batched samplers need x of shape (num_chains, dim), got {tuple(point.shape)}"
+                )
+            return point
+        return point if point.ndim == 1 else point.reshape(-1)
+
     @x.setter
     def x(self, value: Union[Sample, torch.Tensor]) -> None:
         if isinstance(value, Sample):
-            point = value.point
-            if point.ndim != 1:
-                point = point.reshape(-1)
+            point = self._as_point(value.point)
             self._x = value
             self._x.point = point
             if self._x.log_prob is None:
                 self._x.log_prob = self._eval_target(point)
         elif isinstance(value, torch.Tensor):
-            point = value if value.ndim == 1 else value.reshape(-1)
+            point = self._as_point(value)
             log_prob = self._eval_target(point)
             self._x = Sample(point=point.detach(), log_prob=log_prob)
         else:
@@ -114,12 +130,15 @@ class Sampler(ABC):
             )
 
     def _eval_target(self, point: torch.Tensor) -> torch.Tensor:
-        """Evaluate the target at ``point`` (no autograd graph) as a 0-D tensor.
+        """Evaluate the target at ``point`` (no autograd graph).
 
-        Gradient-based samplers get gradients via ``log_prob_and_grad``.
+        Returns a 0-D tensor, or one value per chain when batched. Gradient-based
+        samplers get gradients via ``log_prob_and_grad``.
         """
         with torch.no_grad():
             lp = self.target(point).detach()
+        if self.batched:
+            return lp.reshape(point.shape[0])
         return lp.squeeze() if lp.ndim > 0 else lp
 
     @property
@@ -135,7 +154,8 @@ class Sampler(ABC):
         return self._x.point.dtype
 
     def _log_rand(self) -> torch.Tensor:
-        u = torch.rand(1, generator=self.generator, device=self.device, dtype=self.dtype)
+        shape = (self._x.point.shape[0],) if self.batched else (1,)
+        u = torch.rand(shape, generator=self.generator, device=self.device, dtype=self.dtype)
         return torch.log(u)
 
     def _reeval_log_prob(self) -> None:
@@ -145,8 +165,11 @@ class Sampler(ABC):
         """
         self._x.log_prob = self._eval_target(self._x.point)
 
-    def _sample(self) -> int:
-        """Advance the chain by one MCMC step. Returns 1 on accept, 0 on reject."""
+    def _sample(self) -> int | torch.Tensor:
+        """Advance the chain by one MCMC step. Returns 1 on accept, 0 on reject
+        (a boolean per chain when batched)."""
+        if self.batched:
+            return self._sample_batched()
         y: list[Sample] = [self._x]
         for proposal, acceptance_kernel in zip(
             self.proposals, self.acceptance_kernels
@@ -157,6 +180,26 @@ class Sampler(ABC):
                 self.x = y[-1]
                 return 1
         return 0
+
+    def _sample_batched(self) -> torch.Tensor:
+        """One step for every chain. A chain moves to the proposal of the first
+        stage it accepts; later stages are ignored for that chain."""
+        y: list[Sample] = [self._x]
+        point, log_prob = self._x.point, self._x.log_prob
+        accepted = torch.zeros(point.shape[0], dtype=torch.bool, device=self.device)
+        for proposal, acceptance_kernel in zip(
+            self.proposals, self.acceptance_kernels
+        ):
+            y.append(proposal.propose(y, generator=self.generator))
+            alpha = acceptance_kernel(y)
+            take = ~accepted & (alpha > self._log_rand())
+            point = torch.where(take[:, None], y[-1].point, point)
+            log_prob = torch.where(take, y[-1].log_prob, log_prob)
+            accepted = accepted | take
+            if accepted.all():
+                break
+        self._x = Sample(point=point, log_prob=log_prob)
+        return accepted
 
     def __call__(
         self,
@@ -186,10 +229,11 @@ class Sampler(ABC):
         Returns
         -------
         samples : torch.Tensor
-            Tensor of kept samples, shape ``((N - burn_in) // thin, dim)``.
+            Tensor of kept samples, shape ``((N - burn_in) // thin, dim)``, or
+            ``(num_chains, (N - burn_in) // thin, dim)`` when batched.
         log_probs : torch.Tensor
             Target log-density at each kept sample, shape
-            ``((N - burn_in) // thin,)``.
+            ``((N - burn_in) // thin,)``, or ``(num_chains, ...)`` when batched.
         """
         if N < 1:
             raise ValueError(f"N must be >= 1, got {N}")
@@ -198,10 +242,14 @@ class Sampler(ABC):
         if thin < 1:
             raise ValueError(f"thin must be >= 1, got {thin}")
 
-        rejection_streak = 0
+        rejection_streak = (
+            torch.zeros(self._x.point.shape[0], dtype=torch.long, device=self.device)
+            if self.batched
+            else 0
+        )
         kept = max((N - burn_in + thin - 1) // thin, 0)
-        samples = torch.zeros(kept, self.dim, device=self.device, dtype=self.dtype)
-        log_probs = torch.zeros(kept, device=self.device, dtype=self.dtype)
+        samples = torch.zeros(kept, *self._x.point.shape, device=self.device, dtype=self.dtype)
+        log_probs = torch.zeros(kept, *self._x.log_prob.shape, device=self.device, dtype=self.dtype)
 
         iterator = range(N)
         if show_progress:
@@ -211,11 +259,20 @@ class Sampler(ABC):
         for ii in iterator:
             accepted = self._sample()
             self._step += 1
+            rate = accepted.float().mean().item() if self.batched else accepted
             self.acceptance_ratio = (
-                (self._step - 1) * self.acceptance_ratio + accepted
+                (self._step - 1) * self.acceptance_ratio + rate
             ) / self._step
 
-            if self.noisy:
+            if self.noisy and self.batched:
+                # Per-chain streaks; refresh only the chains that are stuck.
+                rejection_streak = torch.where(accepted, 0, rejection_streak + 1)
+                stuck = rejection_streak >= self.reeval
+                if stuck.any():
+                    fresh = self._eval_target(self._x.point)
+                    self._x.log_prob = torch.where(stuck, fresh, self._x.log_prob)
+                    rejection_streak = torch.where(stuck, 0, rejection_streak)
+            elif self.noisy:
                 rejection_streak = 0 if accepted else rejection_streak + 1
                 if rejection_streak == self.reeval:
                     self._reeval_log_prob()
@@ -229,7 +286,10 @@ class Sampler(ABC):
                 log_probs[keep_idx] = self._x.log_prob.detach()
                 keep_idx += 1
 
-        return samples[:keep_idx], log_probs[:keep_idx]
+        samples, log_probs = samples[:keep_idx], log_probs[:keep_idx]
+        if self.batched:  # chain-first, as run_chains and diagnostics expect
+            return samples.transpose(0, 1), log_probs.transpose(0, 1)
+        return samples, log_probs
 
     def state_dict(self) -> dict:
         """Serializable snapshot of sampler state for resuming a chain."""

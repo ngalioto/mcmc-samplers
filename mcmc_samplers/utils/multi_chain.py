@@ -45,9 +45,9 @@ def run_chains(
 
     Notes
     -----
-    Chains run sequentially. For true parallelism use
-    ``torch.multiprocessing`` to fan out and call this function per worker,
-    then ``torch.cat`` the results.
+    Chains run sequentially, which works with every sampler. MH, AM and DRAM
+    can instead run all chains at once with ``batched=True``, which is much
+    faster when the target can evaluate many points in one call.
     """
     if num_chains < 1:
         raise ValueError(f"num_chains must be >= 1, got {num_chains}")
