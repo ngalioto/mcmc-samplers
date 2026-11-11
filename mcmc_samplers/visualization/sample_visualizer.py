@@ -112,16 +112,25 @@ class SampleVisualizer:
         labels: Tuple[str, ...] | None = None,
         titles: Tuple[str, ...] | None = None,
         partition: Tuple[Tuple[int, ...], ...] | None = None,
+        fig=None,
         **hist_kwargs,
     ):
-        """Plot a triangular matrix of 1-D / 2-D marginal histograms."""
+        """Plot a triangular matrix of 1-D / 2-D marginal histograms.
+
+        Pass ``fig`` (a Figure or SubFigure) to draw into it instead of a new
+        figure, e.g. to compare methods side by side with ``fig.subfigures``.
+        """
         labels, titles, partition = self._get_defaults(labels, titles, partition)
+        if fig is not None and len(partition) > 1:
+            raise ValueError("fig can only be used with a single partition")
 
         samples = self._flat
         figs, axes_out = [], []
         for ii, idx in enumerate(partition):
             len_idx = len(idx)
-            fig, axs = plt.subplots(len_idx, len_idx, squeeze=False)
+            if fig is None:
+                fig = plt.figure()
+            axs = fig.subplots(len_idx, len_idx, squeeze=False)
             for row in range(len_idx):
                 for col in range(len_idx):
                     if row < col:
@@ -154,6 +163,7 @@ class SampleVisualizer:
             fig.suptitle(titles[ii])
             figs.append(fig)
             axes_out.append(axs)
+            fig = None
 
         return figs, axes_out
 
@@ -163,12 +173,18 @@ class SampleVisualizer:
         labels: Tuple[str, ...] | None = None,
         titles: Tuple[str, ...] | None = None,
         partition: Tuple[Tuple[int, ...], ...] | None = None,
+        axs=None,
+        label: str | None = None,
     ):
         """Plot per-dimension autocorrelation functions.
 
         For multi-chain input, all chains are overlaid on the same axes.
+        To compare methods on one plot, pass the ``axs`` returned by a previous
+        call and give each call a ``label`` for the legend.
         """
         labels, titles, partition = self._get_defaults(labels, titles, partition)
+        if axs is not None and len(partition) > 1:
+            raise ValueError("axs can only be used with a single partition")
 
         if self._multi:
             acfs = torch.stack(
@@ -180,21 +196,31 @@ class SampleVisualizer:
 
         figs, axes_out = [], []
         for ii, idx in enumerate(partition):
-            fig, axs = plt.subplots(len(idx), sharex=True, squeeze=False)
-            axs = axs[:, 0]
+            if axs is None:
+                fig, axs = plt.subplots(len(idx), sharex=True, squeeze=False)
+                axs = axs[:, 0]
+            fig = axs[0].figure
             for jj, idx_jj in enumerate(idx):
+                color = None  # one colour per call, shared by all its chains
                 for c in range(acfs.shape[0]):
-                    axs[jj].plot(
+                    (line,) = axs[jj].plot(
                         lags,
                         acfs[c, :, idx_jj],
+                        color=color,
                         alpha=0.6 if acfs.shape[0] > 1 else 1.0,
+                        label=label if c == 0 else None,
                     )
+                    color = line.get_color()
                 axs[jj].axhline(0.0, color="k", linewidth=0.5)
                 axs[jj].set_ylabel(labels[idx_jj])
+                if label is not None:
+                    axs[jj].legend()
             axs[-1].set_xlabel("Lag")
-            fig.suptitle(titles[ii])
+            if titles[ii] is not None:
+                fig.suptitle(titles[ii])
             figs.append(fig)
             axes_out.append(axs)
+            axs = None
 
         return figs, axes_out
 
