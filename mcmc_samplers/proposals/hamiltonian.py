@@ -194,6 +194,9 @@ class HamiltonianDynamics(Proposal):
         log_prob = None
         for ii in range(L):
             q = q + h * self._momentum_to_velocity(p)
+            if not torch.isfinite(q).all():
+                # Diverged: stop integrating; log_prob = -inf means rejection.
+                return q, p, torch.tensor(-float("inf"), dtype=q.dtype, device=q.device), grad
             log_prob, grad = log_prob_and_grad(self.target, q)
             if ii != L - 1:
                 p = p + h * grad

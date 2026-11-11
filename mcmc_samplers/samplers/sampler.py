@@ -49,9 +49,14 @@ class Sampler(ABC):
         Per-sampler RNG. When ``None``, one is seeded from torch's global RNG
         (so ``torch.manual_seed`` makes runs reproducible).
     noisy : bool
-        If true, periodically re-evaluate ``target`` at the current point to
-        absorb stochastic-likelihood noise (see Sherlock et al. 2017). Useful
-        with simulation-based likelihoods.
+        For stochastic likelihoods (e.g. synthetic or particle-filter
+        likelihoods). If true, re-evaluate ``target`` at the current point
+        after ``reeval`` consecutive rejections, so the chain does not stay
+        stuck on a lucky overestimate (Maraia et al. 2023, following noisy MH,
+        Medina-Aguayo et al. 2016). This improves mixing but makes the sampler
+        approximate. With ``noisy=False`` the estimate at the current point is
+        never refreshed, which is exact pseudo-marginal MCMC when ``exp(target)``
+        is an unbiased likelihood estimate.
     reeval : int
         Number of consecutive rejections before triggering a re-evaluation.
     """

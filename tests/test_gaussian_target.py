@@ -209,3 +209,19 @@ def test_run_chains_multi_chain(correlated_gaussian):
         _check_gaussian_chain(
             chains[c], correlated_gaussian.mean, correlated_gaussian.cov, mean_tol=0.3
         )
+
+
+def test_hmc_rejects_divergent_trajectories():
+    """A step size far too large sends the trajectory to inf/NaN. That must be
+    rejected, not passed to the target (which may raise on invalid input)."""
+    dist = torch.distributions.MultivariateNormal(torch.zeros(2), torch.eye(2))
+    sampler = HamiltonianMonteCarlo(
+        target=dist.log_prob,
+        x0=torch.zeros(2),
+        step_size=10.0,
+        num_steps=500,
+        generator=_gen(0),
+    )
+    samples, log_probs = sampler(20, show_progress=False)
+    assert torch.isfinite(samples).all() and torch.isfinite(log_probs).all()
+    assert sampler.acceptance_ratio < 0.5
