@@ -7,7 +7,9 @@ A Python package for performing MCMC sampling with PyTorch. Version 0.1.0.
 - **Random-walk samplers**: Metropolis-Hastings, Adaptive Metropolis, and Delayed Rejection Adaptive Metropolis (DRAM).
 - **Gradient-based samplers**: Hamiltonian Monte Carlo (with optional mass matrix), Metropolis-adjusted Langevin (MALA), and the No-U-Turn Sampler (NUTS) with dual-averaging step-size adaptation.
 - **Specialized samplers**: parallel tempering (replica exchange) for multimodal targets, and preconditioned Crank-Nicolson (pCN) for high-dimensional Gaussian-prior posteriors.
-- **Diagnostics**: autocorrelation, effective sample size, and Gelman-Rubin R-hat.
+- **Diagnostics**: autocorrelation, single- and multi-chain effective sample size, and rank-normalized split R-hat (Vehtari et al. 2021).
+- **Constrained parameters**: `transformed_target` samples positive, bounded or simplex-valued parameters in an unconstrained space.
+- **Noisy likelihoods**: with a stochastic likelihood (e.g. synthetic or particle-filter likelihoods) the default is exact pseudo-marginal MCMC; `noisy=True` adds the re-evaluation heuristic of Maraia et al. (2023), which mixes better but is approximate.
 - **Multi-chain runner** and an extended `SampleVisualizer` (chain traces, ACF, triangular histograms, summary tables).
 - **Resumable samplers**: every sampler supports `state_dict()` / `load_state_dict()` to checkpoint and resume long-running chains.
 
@@ -33,7 +35,8 @@ For development:
 
 ```sh
 pip install -e ".[dev]"
-pytest
+pytest              # fast tests
+pytest -m slow      # simulation-based calibration of the samplers (a few minutes)
 ```
 
 ## Framework
@@ -47,7 +50,7 @@ Each sampler is a (proposal, acceptance-kernel) pipeline. Samplers can be compos
 * `ScaledCovariance`: lightweight view of another proposal's covariance, scaled by a constant.
 * `HamiltonianDynamics`: leapfrog-integrated Hamiltonian dynamics. Supports diagonal or full mass matrices.
 * `LangevinProposal`: drift + diffusion proposal underlying MALA.
-* `PreconditionedCrankNicolson`: dimension-robust symmetric proposal for Gaussian-prior posteriors.
+* `PreconditionedCrankNicolson`: dimension-robust, prior-reversible proposal for Gaussian-prior posteriors.
 
 ### Samplers
 
@@ -101,9 +104,45 @@ def factory(chain_idx):
     )
 
 chains, log_probs = run_chains(factory, num_chains=4, N=4_000, burn_in=500)
-print('R-hat:', diagnostics.gelman_rubin(chains))
-print('ESS  :', diagnostics.effective_sample_size(chains.reshape(-1, 2)))
+print('R-hat:', diagnostics.rhat(chains))                   # want < 1.01
+print('ESS  :', diagnostics.effective_sample_size(chains))  # combined over chains
 ```
+
+## Constrained parameters
+
+Sample in an unconstrained space and map back, using the bijections in
+`torch.distributions`:
+
+```python
+from torch.distributions import biject_to, constraints
+from mcmc_samplers import MetropolisHastings, transformed_target
+
+positive = biject_to(constraints.positive)  # z -> exp(z)
+sampler = MetropolisHastings(transformed_target(target, positive),
+                             x0=positive.inv(x0), cov=cov)
+z, _ = sampler(5_000)
+x = positive(z)
+```
+
+## Choosing a sampler
+
+[benchmarks/benchmark.py](benchmarks/benchmark.py) reports the smallest per-coordinate
+effective sample size per second and per 1000 target evaluations (4000 steps,
+untuned defaults):
+
+| Sampler | 10-d Gaussian: ESS / s | ESS / 1000 evals | 2-d banana: ESS / s | ESS / 1000 evals |
+|---|---|---|---|---|
+| MH | 2 | 1.4 | 12 | 8.6 |
+| AM | 23 | 20.2 | 26 | 24.8 |
+| DRAM | 10 | 10.3 | 14 | 15.7 |
+| MALA | 2 | 3.4 | 5 | 7.5 |
+| HMC | 2 | 2.3 | 3 | 3.6 |
+| NUTS | 2 | 1.9 | 2 | 2.8 |
+
+On small, cheap targets the adaptive random-walk samplers are hard to beat.
+NUTS gives the most effective samples per draw, but each draw costs many
+gradient evaluations; it pays off as the dimension grows. When the target is
+expensive (a filter likelihood, an ODE solve), compare samplers per evaluation.
 
 ## Resuming a chain
 
@@ -130,6 +169,7 @@ The [examples](examples/) directory contains notebooks covering:
 - [Parallel tempering on a bimodal target](examples/parallel_tempering.ipynb)
 - [pCN in high dimensions](examples/pcn.ipynb)
 - [Multi-chain convergence diagnostics](examples/diagnostics.ipynb)
+- [System identification with bside: DRAM vs NUTS](examples/bside_system_id.ipynb)
 
 ## Citation / references
 
@@ -140,6 +180,10 @@ The [examples](examples/) directory contains notebooks covering:
 - Hoffman, M.D., Gelman, A. (2014). "The No-U-Turn Sampler." *JMLR* 15: 1593-1623.
 - Roberts, G.O., Tweedie, R.L. (1996). "Exponential convergence of Langevin distributions and their discrete approximations." *Bernoulli* 2: 341-363.
 - Cotter, S.L., Roberts, G.O., Stuart, A.M., White, D. (2013). "MCMC methods for functions: modifying old algorithms to make them faster." *Statistical Science* 28(3): 424-446.
+- Medina-Aguayo, F.J., Lee, A., Roberts, G.O. (2016). "Stability of noisy Metropolis-Hastings." *Statistics and Computing* 26: 1187-1211.
+- Maraia, R., Springer, S., Härkönen, T., Simon, M., Haario, H. (2023). "Bayesian synthetic likelihood for stochastic models with applications in mathematical finance." *Frontiers in Applied Mathematics and Statistics* 9: 1187878.
+- Talts, S., Betancourt, M., Simpson, D., Vehtari, A., Gelman, A. (2018). "Validating Bayesian inference algorithms with simulation-based calibration." arXiv:1804.06788.
+- Vehtari, A., Gelman, A., Simpson, D., Carpenter, B., Bürkner, P.-C. (2021). "Rank-normalization, folding, and localization: an improved R-hat for assessing convergence of MCMC." *Bayesian Analysis* 16(2): 667-718.
 
 ## Author information
 
